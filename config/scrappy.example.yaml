@@ -1,0 +1,56 @@
+# Scrappy OS - optional YAML configuration.
+#
+# Copy to config/scrappy.yaml (git-ignored) or point SCRAPPY_CONFIG_FILE at it.
+# Environment variables take precedence over anything here, so a systemd
+# EnvironmentFile still wins.
+#
+# Every key is optional. Anything omitted keeps its default.
+
+# --- model routing ---------------------------------------------------------
+model_provider: mock        # mock | openai | ollama
+model_name: gpt-4o-mini
+model_timeout_seconds: 60
+model_temperature: 0.1
+
+# Secrets do NOT belong here. Set OPENAI_API_KEY in the environment or in a
+# root-owned .env; this file is easy to commit by accident.
+openai_base_url: https://api.openai.com/v1
+ollama_base_url: http://127.0.0.1:11434
+
+# --- storage ---------------------------------------------------------------
+data_dir: ~/.local/share/scrappy-os
+workspace: ~/.local/share/scrappy-os/workspace
+allowed_read_roots: /etc,/proc,/sys,/var/log,/usr/share
+
+# --- orchestration budgets (these bound a runaway loop) --------------------
+max_plan_steps: 12
+max_replans: 2
+max_task_seconds: 300
+max_consecutive_tool_failures: 3
+max_model_calls: 24
+
+# --- policy ----------------------------------------------------------------
+allow_approvals: true       # false = deny privileged work outright
+approval_ttl_minutes: 15
+default_max_risk: read      # read | write | privileged | destructive
+
+# --- shell tool ------------------------------------------------------------
+# An empty allowlist disables the shell tool entirely.
+shell_allowlist: ls,cat,head,tail,grep,find,df,du,free,uptime,ps,systemctl,journalctl,uname,hostname,id,which,stat,wc,date,nginx
+shell_denylist: rm,dd,mkfs,shutdown,reboot,halt,poweroff,chown,chmod,passwd,useradd,userdel,visudo,sudo,su
+shell_timeout_seconds: 30
+shell_max_output_bytes: 65536
+
+# --- outbound http ---------------------------------------------------------
+http_enabled: true
+http_timeout_seconds: 15
+http_max_bytes: 1048576
+http_max_redirects: 3
+http_allow_private_networks: false   # true re-opens the cloud-metadata SSRF path
+
+# --- runtime ---------------------------------------------------------------
+api_host: 127.0.0.1         # the API has no authentication; keep it local
+api_port: 8787
+heartbeat_seconds: 30
+log_level: INFO
+log_format: console         # console | json

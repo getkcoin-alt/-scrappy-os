@@ -1,0 +1,117 @@
+########################################################################
+# Scrappy OS - systemd unit
+#
+# Install:
+#   sudo cp deploy/scrappy-os.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now scrappy-os
+#
+# Read deploy/README.md first. It covers creating the service account and
+# the trade-off you are making by granting this service any privilege at all.
+#
+# This unit does NOT run as root. Scrappy OS is an AI control plane: the
+# operations it proposes are generated, not written by a person, and the
+# whole design assumes it is confined. Running it as root discards every
+# containment property described in docs/SECURITY.md.
+########################################################################
+
+[Unit]
+Description=Scrappy OS - AI-native control plane
+Documentation=https://github.com/getkcoin-alt/-scrappy-os
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=scrappy
+Group=scrappy
+
+WorkingDirectory=/opt/scrappy-os
+Environment=PATH=/opt/scrappy-os/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=SCRAPPY_LOG_FORMAT=json
+
+# Credentials live in a root-owned file readable only by this service.
+# Never put secrets in Environment= lines: they are world-readable via
+# `systemctl show` and land in the journal.
+EnvironmentFile=-/etc/scrappy-os/scrappy.env
+
+ExecStart=/opt/scrappy-os/.venv/bin/scrappy serve
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=on-failure
+RestartSec=5s
+# Give in-flight tasks a chance to finish and the SQLite WAL to checkpoint.
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+
+# ---------------------------------------------------------------------
+# Hardening
+#
+# These are defence in depth *underneath* the policy engine, not instead
+# of it: even if a plan escapes the application-level controls, the kernel
+# should still refuse it.
+#
+# If you widen any of these, write down why. Each one you remove gives a
+# generated command somewhere new to go.
+# ---------------------------------------------------------------------
+
+# Filesystem
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# The only writable paths. Keep this list minimal; it is the real workspace
+# boundary as far as the kernel is concerned.
+StateDirectory=scrappy-os
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/scrappy-os
+ProtectProc=invisible
+ProcSubset=pid
+
+# Privilege
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Network: loopback only by default, matching SCRAPPY_API_HOST=127.0.0.1.
+# Reaching a hosted model provider or an Ollama box on the LAN needs
+# AF_INET/AF_INET6, which the next line already permits; what it does not
+# permit is raw sockets or unusual address families.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+# Uncomment ONLY the destinations this instance genuinely needs.
+# IPAddressAllow=localhost
+# IPAddressAllow=<model-provider-ip>/32
+
+# Syscalls
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @mount @swap @reboot @raw-io
+
+# Resources - a runaway loop should hit a wall here as well as in the
+# orchestrator's own budgets.
+LimitNOFILE=4096
+LimitNPROC=512
+MemoryMax=2G
+TasksMax=256
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=scrappy-os
+
+[Install]
+WantedBy=multi-user.target
