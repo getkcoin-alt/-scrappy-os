@@ -152,7 +152,7 @@ against local Ollama:
 | Model | Result |
 |---|---|
 | `llama3.2` (3B) | fails - answers the question with invented disk figures instead of producing a plan, and emits invalid JSON |
-| `phi3` (3.8B) | produces a valid plan, but Vishnu rejects it repeatedly and the task exhausts its replan budget |
+| `phi3` (3.8B) | plans validly, but Vishnu rejects every plan; fails after the replan budget, 4 inference calls, 29 minutes |
 | Hosted mid-tier (`gpt-4o-mini` class) | expected to be the practical floor |
 
 That llama3.2 run is worth understanding rather than working around: it
@@ -285,7 +285,10 @@ Stated plainly, because a security model you cannot see the edges of is not one:
   *blast radius*, not correctness.
 - **Small local models do not clear the bar.** See *Connecting a real model*.
   A 3B model failed to plan at all; a 3.8B one planned but could not satisfy
-  Vishnu. The failure is loud, not silent, but it is still a failure.
+  Vishnu and exhausted its replan budget. The failure is loud, bounded and
+  audited - the budgets did exactly their job - but it is still a failure.
+  The end-to-end diagnostic milestone is demonstrated on the `mock` provider;
+  on this hardware neither local model completed it.
 - **Approving a write outside the workspace does not grant it.** Policy raises
   an approval request for such a write, and the path guard refuses it anyway
   unless the destination is a configured write root. The operator is asked a
