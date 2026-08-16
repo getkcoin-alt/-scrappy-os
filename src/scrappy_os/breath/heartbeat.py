@@ -26,6 +26,7 @@ import psutil
 
 from scrappy_os.core.enums import EventType
 from scrappy_os.core.events import emit
+from scrappy_os.core.identity import SYSTEM_ACTOR
 from scrappy_os.observability.logging import get_logger
 
 if TYPE_CHECKING:
@@ -83,6 +84,7 @@ class Heartbeat:
             self._runtime.bus,
             EventType.HEARTBEAT,
             component="breath",
+            identity=SYSTEM_ACTOR,
             **payload,
         )
         return payload

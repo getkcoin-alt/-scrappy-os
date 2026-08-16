@@ -228,3 +228,47 @@ def test_cli_and_api_actors_are_distinguishable_in_audit_fields() -> None:
     ).audit_fields()
     assert cli["auth_method"] != api["auth_method"]
     assert cli["actor_type"] != api["actor_type"]
+
+
+def test_every_event_in_a_task_carries_the_principal(client: TestClient) -> None:
+    """No unattributed rows anywhere in a run.
+
+    A partially-attributed trail is worse than an unattributed one: it looks
+    complete, so a filter on `actor_id` returns a plausible subset and quietly
+    omits the rest. This asserts the whole set, not a sample.
+    """
+    created = client.post("/tasks", json={"objective": "Inspect disk usage"})
+    task_id = _wait_for_task(client, created.json()["objective_id"])["task_id"]
+
+    events = client.get("/audit", params={"task_id": task_id}).json()["events"]
+    assert events, "the run must have produced events"
+
+    unattributed = [event["event_type"] for event in events if not event["actor_id"]]
+    assert not unattributed, f"events with no principal: {sorted(set(unattributed))}"
+    assert {event["auth_method"] for event in events} == {str(AuthMethod.BEARER_TOKEN)}
+
+
+def test_the_cli_principal_reaches_the_audit_trail(settings: ScrappySettings) -> None:
+    """The CLI path is in-process, so it needs its own end-to-end assertion."""
+    import asyncio
+
+    from scrappy_os.heart.runtime import Runtime
+
+    settings.ensure_directories()
+
+    async def run() -> list[dict[str, Any]]:
+        runtime = Runtime(settings)
+        await runtime.start(configure_logs=False)
+        try:
+            outcome = await runtime.submit(
+                Objective(text="Inspect disk usage", identity=local_cli_actor(username="root"))
+            )
+            return await runtime.audit.for_task(outcome.task.id)
+        finally:
+            await runtime.stop()
+
+    events = asyncio.run(run())
+    assert events
+    assert {event["actor_id"] for event in events} == {"root"}
+    # And it is marked as local-process trust, not as a token holder.
+    assert {event["auth_method"] for event in events} == {str(AuthMethod.LOCAL_PROCESS)}

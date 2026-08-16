@@ -116,13 +116,13 @@ class Orchestrator:
                 EventType.TASK_CREATED,
                 task_id=task.id,
                 component="orchestrator",
+                # The principal that submitted this objective, carried onto every
+                # event of the run so the trail can be filtered by who asked.
+                identity=objective.identity,
                 objective=objective.text,
                 actor=objective.actor,
                 max_risk=str(objective.max_risk),
                 dry_run=objective.dry_run,
-                # The principal that submitted this objective, carried onto every
-                # event of the run so the audit trail can be filtered by who.
-                **(objective.identity.audit_fields() if objective.identity else {}),
             )
             logger.info(
                 "task_created",
@@ -172,12 +172,13 @@ class Orchestrator:
             )
             budget.record_model_call()
             outcome.decisions.append(brahma_decision)
-            await self._publish_decision(brahma_decision)
+            await self._publish_decision(brahma_decision, task)
             await emit(
                 self._bus,
                 EventType.PLAN_CREATED,
                 task_id=task.id,
                 component="brahma",
+                identity=task.objective.identity,
                 plan_id=plan.id,
                 steps=len(plan.steps),
                 revision=plan.revision,
@@ -188,7 +189,7 @@ class Orchestrator:
             reviewed, review_decision = await self.vishnu.review(task, plan, memory)
             budget.record_model_call()
             outcome.decisions.append(review_decision)
-            await self._publish_decision(review_decision)
+            await self._publish_decision(review_decision, task)
             memory.add_plan(reviewed)
             task.plan_id = reviewed.id
 
@@ -198,6 +199,7 @@ class Orchestrator:
                     EventType.PLAN_REJECTED,
                     task_id=task.id,
                     component="vishnu",
+                    identity=task.objective.identity,
                     plan_id=reviewed.id,
                     reason=reviewed.review_notes or "no acceptable steps",
                 )
@@ -212,6 +214,7 @@ class Orchestrator:
                 EventType.PLAN_APPROVED,
                 task_id=task.id,
                 component="vishnu",
+                identity=task.objective.identity,
                 plan_id=reviewed.id,
                 steps=len(reviewed.steps),
             )
@@ -246,7 +249,7 @@ class Orchestrator:
             verification, verify_decision = await self.vishnu.verify(task, memory)
             budget.record_model_call()
             outcome.decisions.append(verify_decision)
-            await self._publish_decision(verify_decision)
+            await self._publish_decision(verify_decision, task)
 
             decided = verification.decision
             if decided == "complete":
@@ -327,6 +330,7 @@ class Orchestrator:
             EventType.TASK_COMPLETED,
             task_id=task.id,
             component="orchestrator",
+            identity=task.objective.identity,
             success=True,
             duration_ms=round(task.duration_seconds * 1000, 1),
             steps_executed=budget.steps_executed,
@@ -359,6 +363,7 @@ class Orchestrator:
             EventType.TASK_FAILED,
             task_id=task.id,
             component="orchestrator",
+            identity=task.objective.identity,
             success=False,
             error=reason,
             steps_executed=budget.steps_executed,
@@ -386,6 +391,7 @@ class Orchestrator:
             EventType.ROLLBACK_STARTED,
             task_id=task.id,
             component="mahesh",
+            identity=task.objective.identity,
             reason=reason,
         )
 
@@ -394,7 +400,7 @@ class Orchestrator:
         )
         budget.record_model_call()
         outcome.decisions.append(decision)
-        await self._publish_decision(decision)
+        await self._publish_decision(decision, task)
 
         recovered_steps = 0
         for step in recovery_plan.steps:
@@ -413,6 +419,7 @@ class Orchestrator:
             EventType.ROLLBACK_COMPLETED,
             task_id=task.id,
             component="mahesh",
+            identity=task.objective.identity,
             recoverable=recovery.recoverable,
             steps_attempted=len(recovery_plan.steps),
             steps_succeeded=recovered_steps,
@@ -434,17 +441,26 @@ class Orchestrator:
             EventType.TASK_FAILED,
             task_id=task.id,
             component="orchestrator",
+            identity=task.objective.identity,
             success=False,
             error=reason,
             rolled_back=True,
         )
 
-    async def _publish_decision(self, decision: AgentDecision) -> None:
+    async def _publish_decision(self, decision: AgentDecision, task: Task) -> None:
+        """Publish one reasoning turn.
+
+        Takes the task purely to attribute the event. A reasoning turn is still
+        somebody's reasoning turn - it happened inside a principal's task, and an
+        `agent.decided` row with a null actor would be the one hole in a filter
+        over everything that principal caused.
+        """
         await emit(
             self._bus,
             EventType.AGENT_DECIDED,
             task_id=decision.task_id,
             component=str(decision.role),
+            identity=task.objective.identity,
             decision=decision.decision,
             confidence=decision.confidence,
             reasoning=decision.reasoning[:1000],

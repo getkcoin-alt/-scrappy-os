@@ -27,6 +27,7 @@ from typing import Any, Protocol, Self, runtime_checkable
 from pydantic import Field
 
 from scrappy_os.core.enums import EventType
+from scrappy_os.core.identity import Actor
 from scrappy_os.core.models import ScrappyModel, new_id, utc_now
 
 EventHandler = Callable[["Event"], Awaitable[None]]
@@ -252,9 +253,25 @@ async def emit(
     *,
     task_id: str | None = None,
     component: str = "runtime",
+    identity: Actor | None = None,
     **payload: Any,
 ) -> Event:
-    """Convenience publisher. Returns the event so callers can correlate ids."""
+    """Convenience publisher. Returns the event so callers can correlate ids.
+
+    ``identity`` is expanded into the ``actor_id`` / ``actor_type`` /
+    ``auth_method`` keys that the audit log promotes to indexed columns. It is a
+    named parameter rather than something each call site splats in, because the
+    alternative - remembering four keys at fifteen emit sites - is how half a
+    task's events end up unattributed. That is worse than none of them being:
+    the trail looks complete while a filter on ``actor_id`` silently misses rows.
+
+    Named ``identity`` rather than ``actor`` on purpose. Several call sites
+    already pass ``actor=`` as a payload *string* (the proximate requester, e.g.
+    ``agent:brahma``), and both facts are worth keeping - one names who proposed
+    the action, the other who is accountable for it.
+    """
+    if identity is not None:
+        payload = {**identity.audit_fields(), **payload}
     event = Event(type=event_type, task_id=task_id, component=component, payload=payload)
     await bus.publish(event)
     return event

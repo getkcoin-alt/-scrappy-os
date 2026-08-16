@@ -26,6 +26,7 @@ from scrappy_os.brain.orchestrator import Orchestrator, TaskOutcome
 from scrappy_os.core.config import ScrappySettings, get_settings
 from scrappy_os.core.enums import ComponentStatus, EventType, RuntimeStatus
 from scrappy_os.core.events import EventBus, InProcessEventBus, emit
+from scrappy_os.core.identity import SYSTEM_ACTOR
 from scrappy_os.core.models import ComponentHealth, Objective, RuntimeState, new_id, utc_now
 from scrappy_os.memory.episodic import SQLiteEpisodicMemory
 from scrappy_os.memory.semantic import NullSemanticMemory
@@ -136,6 +137,10 @@ class Runtime:
             self.bus,
             EventType.RUNTIME_STARTED,
             component="heart",
+            # Lifecycle is the runtime acting for itself. Attributing it to the
+            # system actor rather than leaving a null keeps "every audit row has
+            # an actor" true, so a null becomes a bug rather than a category.
+            identity=SYSTEM_ACTOR,
             version=__version__,
             pid=self.state.pid,
             hostname=self.state.hostname,
@@ -179,6 +184,7 @@ class Runtime:
             self.bus,
             EventType.RUNTIME_STOPPED,
             component="heart",
+            identity=SYSTEM_ACTOR,
             uptime_seconds=round(self.state.uptime_seconds, 1),
             completed_tasks=self.state.completed_tasks,
             failed_tasks=self.state.failed_tasks,
