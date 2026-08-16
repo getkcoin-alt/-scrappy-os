@@ -65,8 +65,17 @@ async def test_exposed_without_a_token_is_a_failure(settings: ScrappySettings) -
     assert report.healthy is False, "doctor must exit non-zero here"  # type: ignore[attr-defined]
 
 
-async def test_exposed_with_a_token_warns_but_does_not_fail(settings: ScrappySettings) -> None:
-    """A defensible deployment. Still worth saying what a bearer token is not."""
+async def test_exposed_with_a_token_warns_but_does_not_fail(
+    settings: ScrappySettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A defensible deployment. Still worth saying what a bearer token is not.
+
+    euid is pinned because this asserts on the whole report, and the privilege
+    check fails root-plus-exposed on its own account. Without pinning, the
+    outcome would depend on who ran pytest: green for a developer, red in a
+    root CI container, for reasons having nothing to do with the binding.
+    """
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
     settings.api_host = "0.0.0.0"
     settings.api_token = SecretStr(TOKEN)
 
