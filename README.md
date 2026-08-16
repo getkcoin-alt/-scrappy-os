@@ -19,8 +19,8 @@ verifies what happened, and records all of it.
             audit    -> 13 events recorded for task 08326a05
 ```
 
-Status: **v0.1**. Single node, single machine, diagnostic-first. See
-[Roadmap](docs/ROADMAP.md).
+Status: **v0.2**. Single node, single machine, diagnostic-first, with an
+authenticated API and end-to-end actor identity. See [Roadmap](docs/ROADMAP.md).
 
 ---
 
@@ -305,7 +305,7 @@ make lint         # ruff
 make typecheck    # mypy --strict
 make test         # full suite
 make security-test
-make check        # lint + test: the v0.1 gate
+make check        # lint + test: the release gate
 ```
 
 The test suite is organised by what it protects:
@@ -325,8 +325,8 @@ Agent responsibilities: [docs/AGENT_PROTOCOL.md](docs/AGENT_PROTOCOL.md).
 
 | Version | Scope |
 |---|---|
-| **v0.1** | Single-node Linux control plane. Diagnose, explain, refuse. |
-| v0.2 | Browser automation, richer system tools, mutating git |
+| v0.1 | Single-node Linux control plane. Diagnose, explain, refuse. |
+| **v0.2** | API authentication and actor identity ✅. Browser automation, richer system tools and mutating git still to come. |
 | v0.3 | Voice and vision interfaces |
 | v0.4 | Remote Scrappy nodes |
 | v0.5 | VM and container operator layer |

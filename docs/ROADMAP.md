@@ -27,13 +27,37 @@ semantic recall, plan-level approval.
 
 ---
 
-## v0.2 — Browser and richer system tools
+## v0.2 — Authentication, then browser and richer system tools
+
+### Shipped: API authentication and actor identity ✅
+
+The largest known gap in v0.1 is closed. The assumption "the API is safe because
+it is bound to localhost" is replaced by an explicit authenticated request and a
+typed actor identity that survives the whole run.
+
+- Bearer authentication on every endpoint but `GET /health`, fail-closed when no
+  token is configured
+- Typed `Actor` (human / service / node / system) with scopes and an
+  authentication method, frozen and attenuation-only
+- Centralised authorization: six scopes, unknown scopes denied, decided in one
+  place rather than compared as strings in endpoints
+- Identity propagated from request through task, orchestration, policy, tool
+  call and every audit row - `actor_id` is never null
+- Authentication, authorization, policy and tool failures kept as four distinct
+  audit event types
+- `doctor` FAILs on a non-loopback bind with no credential
+- CLI keeps driving the runtime in-process, labelled `local_process`, with the
+  reasoning documented rather than a token check that would enforce nothing
+
+**Deliberately not yet:** multiple tokens, rotation, expiry, mTLS, node
+identities, OIDC, per-actor policy. The `Authenticator` protocol and the
+`TokenCredential` list are the seams these arrive through; none of them requires
+reworking the token checker.
+
+### Still to come in v0.2
 
 The theme is **more capability at the same level of control**. Everything below
 is a typed tool with a declared risk level; none of it is a new bypass.
-
-- **API authentication.** Token or mTLS, so exposing the API is a configuration
-  choice rather than a mistake. This is the largest known gap in v0.1.
 - **Browser automation** as typed operations - navigate, extract, screenshot -
   not "drive a browser however you like". Fetched page content joins the
   untrusted-data category, with the same delimiters as tool output.
