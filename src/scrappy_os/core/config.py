@@ -59,6 +59,10 @@ class ScrappySettings(BaseSettings):
         extra="ignore",
         protected_namespaces=(),
         case_sensitive=False,
+        # Fields with a validation_alias would otherwise be unreachable by their
+        # own name, which breaks YAML config files and explicit constructor
+        # overrides. Both are supported paths, so both must work.
+        populate_by_name=True,
     )
 
     # -- model routing ------------------------------------------------------
@@ -92,7 +96,7 @@ class ScrappySettings(BaseSettings):
     )
     allowed_read_roots_raw: str = Field(
         default=DEFAULT_READ_ROOTS,
-        validation_alias=AliasChoices("SCRAPPY_ALLOWED_READ_ROOTS"),
+        validation_alias=AliasChoices("SCRAPPY_ALLOWED_READ_ROOTS", "allowed_read_roots"),
     )
 
     # -- orchestration limits ----------------------------------------------
@@ -116,11 +120,11 @@ class ScrappySettings(BaseSettings):
     # -- shell tool ---------------------------------------------------------
     shell_allowlist_raw: str = Field(
         default=DEFAULT_SHELL_ALLOWLIST,
-        validation_alias=AliasChoices("SCRAPPY_SHELL_ALLOWLIST"),
+        validation_alias=AliasChoices("SCRAPPY_SHELL_ALLOWLIST", "shell_allowlist"),
     )
     shell_denylist_raw: str = Field(
         default=DEFAULT_SHELL_DENYLIST,
-        validation_alias=AliasChoices("SCRAPPY_SHELL_DENYLIST"),
+        validation_alias=AliasChoices("SCRAPPY_SHELL_DENYLIST", "shell_denylist"),
     )
     shell_timeout_seconds: float = Field(default=30.0, gt=0, le=600)
     shell_max_output_bytes: int = Field(default=64 * 1024, ge=1024, le=8 * 1024 * 1024)

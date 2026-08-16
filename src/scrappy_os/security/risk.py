@@ -74,6 +74,16 @@ DESTRUCTIVE_EXECUTABLES: frozenset[str] = frozenset(
     }
 )
 
+#: Verbs that mutate state regardless of which subcommand precedes them.
+#: `ip link` reads; `ip link set eth0 down` takes an interface offline.
+MUTATING_VERBS: frozenset[str] = frozenset(
+    {"set", "add", "del", "delete", "flush", "change", "replace", "up", "down"}
+)
+
+#: Executable *prefixes* that are destructive in every variant they ship in,
+#: e.g. mkfs, mkfs.ext4, mkfs.xfs.
+DESTRUCTIVE_EXECUTABLE_PREFIXES: tuple[str, ...] = ("mkfs", "fsck", "sfdisk", "cfdisk")
+
 #: Argument shapes that make an otherwise-tame command destructive.
 DESTRUCTIVE_ARGUMENT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^--?(force|f)$"),
@@ -144,6 +154,10 @@ def classify_command(argv: Sequence[str]) -> tuple[RiskLevel, str]:
     if executable in DESTRUCTIVE_EXECUTABLES:
         return RiskLevel.DESTRUCTIVE, f"{executable} destroys data or availability"
 
+    for prefix in DESTRUCTIVE_EXECUTABLE_PREFIXES:
+        if executable == prefix or executable.startswith(f"{prefix}."):
+            return RiskLevel.DESTRUCTIVE, f"{executable} writes filesystem structures"
+
     subcommand = next((arg.lower() for arg in arguments if not arg.startswith("-")), None)
 
     if executable in PRIVILEGED_SUBCOMMANDS:
@@ -151,13 +165,18 @@ def classify_command(argv: Sequence[str]) -> tuple[RiskLevel, str]:
         read_only = READ_ONLY_SUBCOMMANDS.get(executable, frozenset())
         if subcommand in mutating:
             return RiskLevel.PRIVILEGED, f"{executable} {subcommand} changes system state"
-        if subcommand in read_only:
+        if subcommand in read_only and not _has_mutating_verb(arguments, subcommand):
             return RiskLevel.READ, f"{executable} {subcommand} only reads state"
         return RiskLevel.PRIVILEGED, f"unrecognised {executable} subcommand {subcommand!r}"
 
     if executable in PRIVILEGED_EXECUTABLES:
         read_only = READ_ONLY_SUBCOMMANDS.get(executable, frozenset())
         if subcommand is not None and subcommand in read_only:
+            if _has_mutating_verb(arguments, subcommand):
+                return (
+                    RiskLevel.PRIVILEGED,
+                    f"{executable} {subcommand} is read-only, but this invocation mutates state",
+                )
             return RiskLevel.READ, f"{executable} {subcommand} only reads state"
         return RiskLevel.PRIVILEGED, f"{executable} can change system state"
 
@@ -167,6 +186,19 @@ def classify_command(argv: Sequence[str]) -> tuple[RiskLevel, str]:
                 return RiskLevel.DESTRUCTIVE, f"forcing flag {argument!r}"
 
     return RiskLevel.READ, f"{executable} is treated as a read-only inspection command"
+
+
+def _has_mutating_verb(arguments: list[str], subcommand: str | None) -> bool:
+    """Whether a mutating verb appears after a nominally read-only subcommand."""
+    seen_subcommand = subcommand is None
+    for argument in arguments:
+        lowered = argument.lower()
+        if not seen_subcommand:
+            seen_subcommand = lowered == subcommand
+            continue
+        if lowered in MUTATING_VERBS:
+            return True
+    return False
 
 
 def classify_command_string(command: str) -> tuple[RiskLevel, str]:
@@ -203,6 +235,7 @@ def classify_path_delete(path: str | Path, *, workspace: Path) -> tuple[RiskLeve
 __all__ = [
     "DESTRUCTIVE_ARGUMENT_PATTERNS",
     "DESTRUCTIVE_EXECUTABLES",
+    "MUTATING_VERBS",
     "PRIVILEGED_EXECUTABLES",
     "SHELL_METACHARACTERS",
     "classify_command",

@@ -79,7 +79,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S105", "S106", "S108", "S603", "S607"]
+"tests/**" = ["S104", "S105", "S106", "S108", "S603", "S607", "SLF001"]
 "src/scrappy_os/tools/shell.py" = ["S603"]  # subprocess use is the point; guarded by policy
 
 [tool.ruff.lint.isort]

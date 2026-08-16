@@ -71,7 +71,7 @@ def configure_logging(
             getattr(logging, level.upper(), logging.INFO)
         ),
         logger_factory=structlog.PrintLoggerFactory(file=stream or sys.stderr),
-        cache_logger_on_first_use=True,
+        cache_logger_on_first_use=False,
     )
     _configured = True
 
@@ -79,12 +79,15 @@ def configure_logging(
 def get_logger(component: str) -> structlog.stdlib.BoundLogger:
     """A logger bound to a component name.
 
-    Configures with defaults on first use so that importing a module and
-    calling it from a test never produces an unconfigured logger.
+    Returns structlog's *lazy* proxy rather than calling ``.bind()`` here.
+    ``.bind()`` materialises a bound logger immediately, freezing the level in
+    place - and module-level loggers are created at import time, before the CLI
+    has chosen a level for the command being run. Staying lazy means
+    :func:`configure_logging` takes effect no matter when it is called.
     """
     if not _configured:
         configure_logging()
-    logger: structlog.stdlib.BoundLogger = structlog.get_logger(component).bind(component=component)
+    logger: structlog.stdlib.BoundLogger = structlog.get_logger(component, component=component)
     return logger
 
 

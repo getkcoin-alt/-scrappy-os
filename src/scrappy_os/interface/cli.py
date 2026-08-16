@@ -86,7 +86,7 @@ def status(
 
     async def run() -> dict[str, Any]:
         runtime = Runtime(settings)
-        await runtime.start()
+        await runtime.start(configure_logs=False)
         try:
             state = await runtime.health()
             pending = await runtime.approvals.pending()
@@ -112,7 +112,7 @@ def status(
     key_value("host", f"{state['hostname']} (pid {state['pid']})")
     key_value("provider", f"{state['provider']} / {state['model']}")
     if payload["development_provider"]:
-        warn("inference is the deterministic development provider, not a model")
+        typer.echo(warn("inference is the deterministic development provider, not a model"))
     key_value("active tasks", str(len(state["active_task_ids"])))
     key_value("completed / failed", f"{state['completed_tasks']} / {state['failed_tasks']}")
     key_value("audit events", str(payload["audit_events"]))
@@ -208,7 +208,7 @@ def ask(
 
     async def run() -> dict[str, Any]:
         runtime = Runtime(settings)
-        await runtime.start()
+        await runtime.start(configure_logs=False)
         runtime.set_approval_prompt(_make_prompt(objective, auto_yes=yes))
         try:
             outcome = await runtime.submit(

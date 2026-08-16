@@ -103,12 +103,18 @@ class Runtime:
 
     # -- lifecycle ----------------------------------------------------------
 
-    async def start(self, *, with_heartbeat: bool = False) -> Self:
-        """Bring the control plane up. Safe to call twice."""
+    async def start(self, *, with_heartbeat: bool = False, configure_logs: bool = True) -> Self:
+        """Bring the control plane up. Safe to call twice.
+
+        ``configure_logs=False`` leaves logging alone, which is what the CLI
+        wants: it has already chosen a level for the command being run and
+        should not have it reset to the daemon default.
+        """
         if self._started:
             return self
 
-        configure_logging(level=self.settings.log_level, fmt=self.settings.log_format)
+        if configure_logs:
+            configure_logging(level=self.settings.log_level, fmt=self.settings.log_format)
         self.settings.ensure_directories()
 
         await self.store.connect()

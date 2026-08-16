@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 
 from scrappy_os import __version__
 from scrappy_os.core.config import ScrappySettings, get_settings
-from scrappy_os.core.enums import RiskLevel, RuntimeStatus
+from scrappy_os.core.enums import EventType, RiskLevel, RuntimeStatus
 from scrappy_os.core.errors import ApprovalExpired, ScrappyError
 from scrappy_os.core.models import ApprovalDecision, Objective
 from scrappy_os.heart.runtime import Runtime
@@ -216,11 +216,20 @@ def _build_router() -> APIRouter:
         resolved_id = runtime.task_id_for(task_id) or task_id
         subscription = runtime.bus.subscribe(task_id=resolved_id)
 
+        terminal = {EventType.TASK_COMPLETED, EventType.TASK_FAILED, EventType.TASK_CANCELLED}
+
         async def stream() -> AsyncIterator[str]:
             try:
                 if replay:
                     for event in runtime.bus.history(task_id=resolved_id):
                         yield _sse(event.model_dump(mode="json"))
+                        if event.type in terminal:
+                            # The task already finished before this stream opened.
+                            # Replaying its ending and then waiting for more would
+                            # hold the connection open forever.
+                            return
+                if handle.done():
+                    return
                 while True:
                     if await request.is_disconnected():
                         return
@@ -232,7 +241,7 @@ def _build_router() -> APIRouter:
                     if event is None:
                         return
                     yield _sse(event.model_dump(mode="json"))
-                    if event.type in {"task.completed", "task.failed"}:
+                    if event.type in terminal:
                         return
             finally:
                 subscription.close()
