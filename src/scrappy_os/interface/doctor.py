@@ -83,6 +83,7 @@ async def run_doctor(
         _check_data_dir(settings),
         _check_workspace(settings),
         _check_read_roots(settings),
+        _check_privileges(settings),
         _check_api_binding(settings),
         _check_shell_config(settings),
         _check_optional_binaries(),
@@ -224,6 +225,46 @@ def _check_read_roots(settings: ScrappySettings) -> CheckResult:
             "Remove paths that do not exist on this host.",
         )
     return CheckResult("read roots", CheckStatus.PASS, detail)
+
+
+def _check_privileges(settings: ScrappySettings) -> CheckResult:
+    """Report the account Scrappy OS is running as.
+
+    Every containment property in docs/SECURITY.md - the workspace boundary,
+    the read roots, the forbidden write trees - is enforced in this process,
+    against operations a model proposed. As root those boundaries are the only
+    thing standing between a generated plan and the whole machine, and the
+    kernel adds nothing underneath them. That is worth saying out loud even
+    when nothing is broken.
+
+    Root plus an off-host listener is not two warnings, it is one unauthenticated
+    remote root control plane, so it is a FAIL rather than the sum of its parts.
+    """
+    if os.geteuid() != 0:
+        return CheckResult(
+            "privileges",
+            CheckStatus.PASS,
+            f"running as uid {os.geteuid()} (unprivileged)",
+        )
+
+    if not settings.api_is_local_only:
+        return CheckResult(
+            "privileges",
+            CheckStatus.FAIL,
+            f"running as root AND the API binds {settings.api_host}:{settings.api_port}, "
+            "which is reachable off this host",
+            "This combination is an unauthenticated remote root control plane. "
+            "Set SCRAPPY_API_HOST=127.0.0.1 and run as a dedicated account "
+            "(deploy/README.md) before giving this instance any work.",
+        )
+
+    return CheckResult(
+        "privileges",
+        CheckStatus.WARN,
+        "running as root; the policy engine is the only thing confining generated actions",
+        "Run as a dedicated unprivileged account - see deploy/README.md. "
+        "The shipped systemd unit already does this.",
+    )
 
 
 def _check_api_binding(settings: ScrappySettings) -> CheckResult:
