@@ -25,8 +25,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
@@ -34,6 +35,14 @@ from pydantic import SecretStr
 
 from scrappy_os.core.errors import ScrappyError
 from scrappy_os.core.identity import Actor, ActorType, AuthMethod, Scope, all_scopes
+from scrappy_os.security.credential_store import CredentialStore
+from scrappy_os.security.credentials import (
+    Credential,
+    CredentialError,
+    CredentialStatus,
+    parse_token,
+    verify_secret,
+)
 
 #: RFC 6750 names this scheme; the comparison against it is case-insensitive.
 BEARER_SCHEME = "bearer"
@@ -114,8 +123,15 @@ class Authenticator(Protocol):
     Implementations must not log, echo or re-raise the header value.
     """
 
-    def authenticate(self, authorization_header: str | None) -> Actor:
-        """Return the authenticated actor or raise :class:`AuthenticationFailed`."""
+    async def authenticate(self, authorization_header: str | None) -> Actor:
+        """Return the authenticated actor or raise :class:`AuthenticationFailed`.
+
+        Async because verifying a credential may need to read it from storage.
+        The in-memory implementations do not await anything, and pay nothing for
+        the signature; the alternative - a sync method plus an async one - would
+        mean two authentication paths, and the one that gets called by mistake
+        is the one that is not enforcing anything.
+        """
         ...
 
     @property
@@ -170,7 +186,7 @@ class StaticTokenAuthenticator:
         """How many credentials are accepted. Never which, and never their values."""
         return len(self._credentials)
 
-    def authenticate(self, authorization_header: str | None) -> Actor:
+    async def authenticate(self, authorization_header: str | None) -> Actor:
         """Verify the header and return the actor it proves."""
         presented = parse_bearer(authorization_header)
 
@@ -215,7 +231,7 @@ class NullAuthenticator:
     def credential_count(self) -> int:
         return 0
 
-    def authenticate(self, authorization_header: str | None) -> Actor:
+    async def authenticate(self, authorization_header: str | None) -> Actor:
         # Parse first, for the same reason as above: accurate diagnostics for the
         # operator, no additional information for the client.
         parse_bearer(authorization_header)
@@ -233,6 +249,111 @@ def generate_token(*, entropy_bytes: int = 32) -> str:
     ``scrappy token new`` can print one to a terminal on request.
     """
     return secrets.token_urlsafe(entropy_bytes)
+
+
+class CredentialAuthenticator:
+    """Authenticates against persisted credentials, with an optional legacy token.
+
+    The token carries a non-secret credential id, so verification reads exactly
+    one row instead of hashing the presented value against every credential in
+    the table. That keeps authentication O(1) as the number of credentials grows,
+    and it is why the id half of the token format exists.
+
+    Every rejection - unparseable, no such id, wrong secret, revoked, expired -
+    raises ``UNKNOWN_CREDENTIAL``. They are genuinely different events for the
+    operator, and they are recorded distinctly in the audit trail, but the client
+    is told one thing. Distinguishing "no such credential" from "wrong secret" is
+    a credential-enumeration oracle, and distinguishing "revoked" would tell a
+    thief precisely when they were noticed.
+
+    A legacy authenticator may be supplied. It is consulted only after the
+    credential path declines, so a stored credential always wins and the legacy
+    token cannot shadow one.
+    """
+
+    def __init__(
+        self,
+        store: CredentialStore,
+        *,
+        pepper: str,
+        legacy: Authenticator | None = None,
+        on_authenticated: Callable[[Credential], Awaitable[None]] | None = None,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._store = store
+        self._pepper = pepper
+        self._legacy = legacy
+        self._on_authenticated = on_authenticated
+        self._now = now or (lambda: datetime.now(UTC))
+
+    @property
+    def configured(self) -> bool:
+        """True: a credential store can always accept a credential that exists.
+
+        Whether any credential *does* exist is a question for ``doctor``, which
+        counts them. Reporting False here when the table happens to be empty
+        would make an empty store indistinguishable from a broken deployment.
+        """
+        return True
+
+    @property
+    def legacy_enabled(self) -> bool:
+        return self._legacy is not None and self._legacy.configured
+
+    async def authenticate(self, authorization_header: str | None) -> Actor:
+        presented = parse_bearer(authorization_header)
+
+        try:
+            credential_id, secret = parse_token(presented)
+        except CredentialError:
+            # Not our token format. It may still be a legacy token, which is the
+            # only reason this is not an immediate refusal.
+            return await self._try_legacy(authorization_header)
+
+        credential = await self._store.get(credential_id)
+        if credential is None:
+            # Still spend the work of a verification against a dummy value, so
+            # "no such credential" and "wrong secret" take comparable time and
+            # an attacker cannot probe which ids exist by timing the response.
+            verify_secret(secret, _ABSENT_CREDENTIAL_VERIFIER, pepper=self._pepper)
+            raise self._unknown()
+
+        if not verify_secret(secret, credential.verifier, pepper=self._pepper):
+            raise self._unknown()
+
+        now = self._now()
+        status = credential.status_at(now)
+        if status is not CredentialStatus.ACTIVE:
+            # The secret was right, so this is a real holder of a credential that
+            # is no longer valid. Worth distinguishing internally; still one
+            # answer to the client.
+            raise AuthenticationFailed(
+                AuthFailureReason.UNKNOWN_CREDENTIAL,
+                "the presented credential is not recognised",
+            )
+
+        if self._on_authenticated is not None:
+            await self._on_authenticated(credential)
+        return credential.to_actor()
+
+    async def _try_legacy(self, header: str | None) -> Actor:
+        if self._legacy is None:
+            raise self._unknown()
+        return await self._legacy.authenticate(header)
+
+    @staticmethod
+    def _unknown() -> AuthenticationFailed:
+        return AuthenticationFailed(
+            AuthFailureReason.UNKNOWN_CREDENTIAL,
+            "the presented credential is not recognised",
+        )
+
+
+#: Verified against when no credential matched, purely to keep the timing of a
+#: miss close to the timing of a hit. Its value is irrelevant - it is a hex
+#: digest that no real secret produces - and it is never stored or compared for
+#: authorization.
+_ABSENT_CREDENTIAL_VERIFIER = "0" * 64
 
 
 def build_authenticator(
@@ -274,6 +395,7 @@ __all__ = [
     "AuthFailureReason",
     "AuthenticationFailed",
     "Authenticator",
+    "CredentialAuthenticator",
     "NullAuthenticator",
     "StaticTokenAuthenticator",
     "TokenCredential",

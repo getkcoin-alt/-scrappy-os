@@ -28,7 +28,7 @@ ProviderName = Literal["mock", "openai", "ollama"]
 #: Fields excluded from every human-readable rendering of the settings.
 #: :meth:`ScrappySettings.redacted_dict` re-adds each one as a presence marker,
 #: so adding a secret here hides its value without hiding its existence.
-SECRET_FIELDS: frozenset[str] = frozenset({"openai_api_key", "api_token"})
+SECRET_FIELDS: frozenset[str] = frozenset({"openai_api_key", "api_token", "token_pepper"})
 
 DEFAULT_READ_ROOTS = "/etc,/proc,/sys,/var/log,/usr/share"
 DEFAULT_SHELL_ALLOWLIST = (
@@ -165,6 +165,15 @@ class ScrappySettings(BaseSettings):
         validation_alias=AliasChoices("SCRAPPY_API_TOKEN_SCOPES", "api_token_scopes"),
         description="Comma-separated scopes for the API token. Empty grants every scope.",
     )
+    token_pepper: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SCRAPPY_TOKEN_PEPPER", "token_pepper"),
+        description=(
+            "Server-side key for credential verifiers. Unset means one is generated "
+            "into the data directory on first run, which works but sits beside the "
+            "database it protects. Set this in production."
+        ),
+    )
     heartbeat_seconds: float = Field(default=30.0, gt=0, le=3600)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["console", "json"] = "console"
@@ -274,6 +283,7 @@ class ScrappySettings(BaseSettings):
         data = self.model_dump(mode="json", exclude=set(SECRET_FIELDS))
         data["openai_api_key"] = "<set>" if self.openai_api_key else "<unset>"
         data["api_token"] = "<set>" if self.api_auth_configured else "<unset>"
+        data["token_pepper"] = "<set>" if self.token_pepper else "<unset>"
         data["api_token_scopes"] = sorted(str(scope) for scope in self.api_token_scopes)
         data["allowed_read_roots"] = [str(path) for path in self.allowed_read_roots]
         data["shell_allowlist"] = list(self.shell_allowlist)

@@ -44,8 +44,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Query, Request
@@ -57,7 +58,7 @@ from scrappy_os.core.config import ScrappySettings, get_settings
 from scrappy_os.core.enums import EventType, RiskLevel, RuntimeStatus
 from scrappy_os.core.errors import ApprovalExpired, ScrappyError
 from scrappy_os.core.identity import Scope
-from scrappy_os.core.models import ApprovalDecision, Objective
+from scrappy_os.core.models import ApprovalDecision, Objective, utc_now
 from scrappy_os.heart.runtime import Runtime
 from scrappy_os.interface.security import (
     RequestSecurityContext,
@@ -66,7 +67,10 @@ from scrappy_os.interface.security import (
 )
 from scrappy_os.observability.logging import get_logger
 from scrappy_os.security.approvals import ApprovalNotFound
-from scrappy_os.security.authn import build_authenticator
+from scrappy_os.security.authn import CredentialAuthenticator, build_authenticator
+from scrappy_os.security.credential_store import SqliteCredentialStore
+from scrappy_os.security.credentials import Credential
+from scrappy_os.security.pepper import resolve_pepper
 
 logger = get_logger("api")
 
@@ -114,6 +118,44 @@ class ApprovalBody(BaseModel):
     confirmation_phrase: str | None = Field(default=None, max_length=200)
 
 
+#: How stale ``last_used_at`` may be before another write is worth doing.
+#:
+#: Every authenticated request could update the row, but a busy client would
+#: then turn each read into a write of the same value, serialised through the
+#: one SQLite connection that the audit trail also uses. Coalescing to a
+#: coarse interval keeps the field useful for its actual purpose - spotting
+#: credentials nobody uses any more - at a fraction of the writes. The cost is
+#: that the timestamp lags by up to this long, which no decision depends on.
+LAST_USED_RESOLUTION = timedelta(minutes=5)
+
+
+def _record_last_used(
+    store: SqliteCredentialStore,
+) -> Callable[[Credential], Awaitable[None]]:
+    """Build the post-authentication hook that maintains ``last_used_at``.
+
+    Failures here are logged and swallowed on purpose: a request that presented
+    a valid credential has authenticated, and losing a bookkeeping write must
+    not turn into a 500 that looks like an auth outage.
+    """
+
+    async def record(credential: Credential) -> None:
+        now = utc_now()
+        previous = credential.last_used_at
+        if previous is not None and now - previous < LAST_USED_RESOLUTION:
+            return
+        try:
+            await store.update_last_used(credential.credential_id, when=now)
+        except ScrappyError as exc:  # pragma: no cover - storage failure path
+            logger.warning(
+                "last_used_update_failed",
+                credential_id=credential.credential_id,
+                error=str(exc),
+            )
+
+    return record
+
+
 def create_app(settings: ScrappySettings | None = None, *, with_heartbeat: bool = True) -> FastAPI:
     """Build the FastAPI application with a managed runtime lifespan."""
     resolved = settings or get_settings()
@@ -124,6 +166,25 @@ def create_app(settings: ScrappySettings | None = None, *, with_heartbeat: bool 
         await runtime.start(with_heartbeat=with_heartbeat)
         application.state.runtime = runtime
         application.state.tasks = {}
+
+        # Upgraded here rather than at construction because the credential store
+        # needs an open database, and the database opens with the runtime. The
+        # legacy authenticator built below is passed in as the fallback, so a
+        # deployment still running on SCRAPPY_API_TOKEN keeps working while
+        # stored credentials take precedence over it.
+        credentials = SqliteCredentialStore(runtime.store)
+        application.state.credential_store = credentials
+        application.state.authenticator = CredentialAuthenticator(
+            credentials,
+            pepper=resolve_pepper(
+                configured=(
+                    resolved.token_pepper.get_secret_value() if resolved.token_pepper else None
+                ),
+                data_dir=resolved.data_dir,
+            ).value,
+            legacy=application.state.legacy_authenticator,
+            on_authenticated=_record_last_used(credentials),
+        )
         try:
             yield
         finally:
@@ -138,12 +199,17 @@ def create_app(settings: ScrappySettings | None = None, *, with_heartbeat: bool 
 
     # Built once at app construction, not per request: the token is read from
     # configuration here and the digests are precomputed, so no request path
-    # ever handles the configured secret.
-    app.state.authenticator = build_authenticator(
+    # ever handles the configured secret. The lifespan above wraps this in a
+    # CredentialAuthenticator once the database is open; until then it is what
+    # answers, so an app used without a lifespan still authenticates rather
+    # than falling open.
+    app.state.legacy_authenticator = build_authenticator(
         resolved.api_token,
         actor_id=resolved.api_token_actor_id,
         scopes=frozenset(resolved.api_token_scopes),
     )
+    app.state.authenticator = app.state.legacy_authenticator
+    app.state.credential_store = None
 
     if not resolved.api_auth_configured:
         logger.warning(

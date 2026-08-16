@@ -235,21 +235,21 @@ def test_parse_bearer_rejects_a_wrong_scheme() -> None:
     assert excinfo.value.reason is AuthFailureReason.MALFORMED_CREDENTIAL
 
 
-def test_authentication_failure_never_carries_the_credential() -> None:
+async def test_authentication_failure_never_carries_the_credential() -> None:
     """The exception is the thing most likely to be logged or re-raised."""
     authenticator = build_authenticator(SecretStr(TOKEN))
     with pytest.raises(AuthenticationFailed) as excinfo:
-        authenticator.authenticate(f"Bearer {WRONG}")
+        await authenticator.authenticate(f"Bearer {WRONG}")
     rendered = f"{excinfo.value.message} {excinfo.value.context} {excinfo.value!r}"
     assert WRONG not in rendered
     assert TOKEN not in rendered
 
 
-def test_null_authenticator_accepts_nothing() -> None:
+async def test_null_authenticator_accepts_nothing() -> None:
     authenticator = NullAuthenticator()
     assert authenticator.configured is False
     with pytest.raises(AuthenticationFailed) as excinfo:
-        authenticator.authenticate(f"Bearer {TOKEN}")
+        await authenticator.authenticate(f"Bearer {TOKEN}")
     assert excinfo.value.reason is AuthFailureReason.NO_CREDENTIALS_CONFIGURED
 
 
@@ -259,7 +259,7 @@ def test_build_authenticator_returns_null_for_an_empty_token() -> None:
     assert isinstance(build_authenticator(SecretStr("")), NullAuthenticator)
 
 
-def test_multiple_credentials_are_all_accepted() -> None:
+async def test_multiple_credentials_are_all_accepted() -> None:
     """The seam token rotation will use: issue the new one, retire the old.
 
     Asserted now so a future rotation feature cannot be built on a checker that
@@ -272,12 +272,12 @@ def test_multiple_credentials_are_all_accepted() -> None:
         ]
     )
     assert authenticator.credential_count == 2
-    assert authenticator.authenticate("Bearer old-token-aaaaaaaaaaaaaaaa").id == "old"
-    assert authenticator.authenticate("Bearer new-token-bbbbbbbbbbbbbbbb").id == "new"
+    assert (await authenticator.authenticate("Bearer old-token-aaaaaaaaaaaaaaaa")).id == "old"
+    assert (await authenticator.authenticate("Bearer new-token-bbbbbbbbbbbbbbbb")).id == "new"
 
 
-def test_the_authenticated_actor_is_a_bearer_token_identity() -> None:
-    actor = build_authenticator(SecretStr(TOKEN), actor_id="ci-runner").authenticate(
+async def test_the_authenticated_actor_is_a_bearer_token_identity() -> None:
+    actor = await build_authenticator(SecretStr(TOKEN), actor_id="ci-runner").authenticate(
         f"Bearer {TOKEN}"
     )
     assert actor.id == "ci-runner"
@@ -286,8 +286,8 @@ def test_the_authenticated_actor_is_a_bearer_token_identity() -> None:
     assert actor.scopes == all_scopes()
 
 
-def test_a_narrowed_token_grants_only_what_it_was_given() -> None:
-    actor = build_authenticator(
+async def test_a_narrowed_token_grants_only_what_it_was_given() -> None:
+    actor = await build_authenticator(
         SecretStr(TOKEN), scopes=frozenset({Scope.TASK_READ})
     ).authenticate(f"Bearer {TOKEN}")
     assert actor.has_scope(Scope.TASK_READ)
@@ -301,7 +301,7 @@ def test_generated_tokens_are_unique_and_long() -> None:
 
 
 @pytest.mark.parametrize("blank", ["   ", "\t", "\n", " \t "])
-def test_a_whitespace_only_token_builds_no_credential(blank: str) -> None:
+async def test_a_whitespace_only_token_builds_no_credential(blank: str) -> None:
     """A blank token must be treated as absent, not as a credential nobody can use.
 
     It is truthy, so it used to produce a StaticTokenAuthenticator holding a
@@ -318,4 +318,4 @@ def test_a_whitespace_only_token_builds_no_credential(blank: str) -> None:
     assert authenticator.credential_count == 0
 
     with pytest.raises(AuthenticationFailed):
-        authenticator.authenticate(f"Bearer {blank}")
+        await authenticator.authenticate(f"Bearer {blank}")

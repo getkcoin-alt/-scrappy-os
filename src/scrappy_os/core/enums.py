@@ -153,6 +153,18 @@ class EventType(StrEnum):
     AUTHZ_DENIED = "authz.denied"
     """A known actor lacked the scope required for the operation."""
 
+    CREDENTIAL_CREATED = "credential.created"
+    """A credential was issued. Records the id and the actor, never the token."""
+
+    CREDENTIAL_ROTATED = "credential.rotated"
+    """A replacement credential was issued for the same actor and scopes."""
+
+    CREDENTIAL_REVOKED = "credential.revoked"
+    """A credential was withdrawn and can no longer authenticate."""
+
+    CREDENTIAL_PRUNED = "credential.pruned"
+    """Expired or revoked credential records were deleted from the store."""
+
     AGENT_DECIDED = "agent.decided"
     ROLLBACK_STARTED = "rollback.started"
     ROLLBACK_COMPLETED = "rollback.completed"

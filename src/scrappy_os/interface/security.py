@@ -156,7 +156,7 @@ async def authenticate_request(request: Request) -> RequestSecurityContext:
     header = request.headers.get("Authorization")
 
     try:
-        actor = authenticator.authenticate(header)
+        actor = await authenticator.authenticate(header)
     except AuthenticationFailed as exc:
         await _record(
             request,

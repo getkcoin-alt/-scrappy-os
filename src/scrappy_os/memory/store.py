@@ -25,7 +25,7 @@ from scrappy_os.observability.logging import get_logger
 
 logger = get_logger("store")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: Columns added after v1, applied to databases that predate them.
 #: Additive only: this mechanism can introduce a nullable column and nothing
@@ -143,6 +143,23 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         steps      TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS credentials (
+        credential_id TEXT PRIMARY KEY,
+        actor_id      TEXT NOT NULL,
+        actor_type    TEXT NOT NULL,
+        display_name  TEXT,
+        scopes        TEXT NOT NULL,
+        verifier      TEXT NOT NULL,
+        created_at    TEXT NOT NULL,
+        expires_at    TEXT,
+        revoked_at    TEXT,
+        last_used_at  TEXT,
+        auth_method   TEXT NOT NULL,
+        metadata      TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_credentials_actor ON credentials(actor_id)",
     "CREATE INDEX IF NOT EXISTS idx_audit_task ON audit_events(task_id, timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_events(timestamp DESC)",
     "CREATE INDEX IF NOT EXISTS idx_calls_task ON tool_calls(task_id, requested_at)",
@@ -243,6 +260,29 @@ class Store:
             await conn.commit()
         except aiosqlite.Error as exc:
             raise StoreError(f"Write failed: {exc}", sql=sql.split("(")[0].strip()) from exc
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Run several statements as one unit, committing once at the end.
+
+        :meth:`execute` commits per call, which is right for the append-only
+        writers but wrong for anything with an invariant spanning two rows.
+        Rotation is the motivating case: issuing the replacement and revoking
+        the original must not be separable, or a crash in between leaves an
+        actor with nothing that works.
+
+        Rolls back on any exception. There is one connection per process, and
+        aiosqlite serialises statements onto its own thread, so a transaction
+        opened here is not interleaved with another caller's writes.
+        """
+        conn = self._require()
+        try:
+            yield conn
+        except BaseException:
+            await conn.rollback()
+            raise
+        else:
+            await conn.commit()
 
     async def fetch_all(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
         conn = self._require()
