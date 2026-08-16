@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import Sequence
 
+import httpx
 import pytest
 from pydantic import BaseModel, Field
 
@@ -254,3 +257,47 @@ async def test_openai_provider_reports_a_missing_key_clearly(
     health = await provider.health_check()
     assert not health.healthy
     assert "OPENAI_API_KEY" in health.detail
+
+
+async def test_ollama_json_mode_does_not_leak_between_concurrent_tasks() -> None:
+    """A structured call must not force a concurrent plain call into JSON mode.
+
+    ModelRouter deliberately shares one provider instance across the whole
+    runtime, and the API runs objectives concurrently via ``Runtime.spawn``.
+    Holding "ask for JSON" on the instance across an ``await`` leaks it into
+    whatever else is in flight: Vishnu's prose conclusion comes back as JSON,
+    or a structured call loses JSON mode and its schema failures go up. Both
+    are silent, so this pins the isolation rather than the implementation.
+    """
+    seen: list[tuple[str, str | None]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append((body["messages"][-1]["content"], body.get("format")))
+        # Yield so the two coroutines genuinely interleave inside this await.
+        await asyncio.sleep(0.05)
+        return httpx.Response(
+            200,
+            json={
+                "message": {"role": "assistant", "content": '{"steps": []}'},
+                "done": True,
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OllamaProvider(model="m", base_url="http://ollama.invalid", client=client)
+
+    async def structured() -> None:
+        await provider.generate_structured([ChatMessage.user("STRUCTURED")], PlanProposal)
+
+    async def plain() -> None:
+        await asyncio.sleep(0.02)  # land inside the structured call's await window
+        await provider.generate([ChatMessage.user("PLAIN")])
+
+    await asyncio.gather(structured(), plain())
+    await provider.aclose()
+
+    formats = dict(seen)
+    assert formats["PLAIN"] is None, "a plain generate() was forced into JSON mode"
+    structured_formats = [fmt for content, fmt in seen if content != "PLAIN"]
+    assert "json" in structured_formats, "the structured call lost JSON mode"

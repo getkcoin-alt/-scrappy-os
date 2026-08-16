@@ -92,8 +92,16 @@ AmbientCapabilities=
 # permit is raw sockets or unusual address families.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 IPAddressDeny=any
-# Uncomment ONLY the destinations this instance genuinely needs.
-# IPAddressAllow=localhost
+# Loopback must be allowed explicitly. IPAddressDeny=any filters ingress as
+# well as egress, so without this line the service starts, listens on
+# 127.0.0.1:8787 and silently refuses every connection - including its own
+# health check - while `systemctl status` still reports it active. Verified
+# on systemd 255: Deny=any alone gives a connection failure with nothing in
+# the journal to explain it.
+IPAddressAllow=localhost
+# Uncomment ONLY the additional destinations this instance genuinely needs.
+# A hosted provider (OpenAI and friends) needs its egress opened here; an
+# Ollama on this same host is already covered by localhost.
 # IPAddressAllow=<model-provider-ip>/32
 
 # Syscalls

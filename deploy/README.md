@@ -93,6 +93,27 @@ curl -s http://127.0.0.1:8787/health | jq
 sudo -u scrappy /opt/scrappy-os/.venv/bin/scrappy doctor
 ```
 
+### If `/health` hangs or connects to nothing
+
+Check `IPAddressAllow` in the unit before you check anything else.
+`IPAddressDeny=any` filters **ingress as well as egress**, so a unit that denies
+everything and allows nothing produces a service that starts cleanly, binds
+`127.0.0.1:8787`, reports `active (running)`, logs nothing unusual, and refuses
+every connection including its own health check. The shipped unit therefore
+ships with `IPAddressAllow=localhost` already set. If you tighten that line,
+this is the failure you will get, and nothing in the journal will say so.
+
+Anything the service must reach *outbound* needs its own `IPAddressAllow`:
+
+| Destination | Needs |
+|---|---|
+| Ollama on this host | already covered by `localhost` |
+| Ollama on the LAN | `IPAddressAllow=<host-ip>/32` |
+| A hosted provider (OpenAI etc.) | `IPAddressAllow=<provider-ip>/32`, or drop the deny |
+
+Leaving egress denied is the safer default: a model provider that cannot be
+reached fails loudly at `doctor`, whereas an over-wide allow is invisible.
+
 ## 5. Granting a specific privilege, if you must
 
 Scrappy OS runs unprivileged, so `systemctl restart nginx` will fail with a

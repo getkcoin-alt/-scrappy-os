@@ -144,6 +144,27 @@ export OPENAI_API_KEY=sk-...
 scrappy doctor    # confirms connectivity before you rely on it
 ```
 
+**The model has to be good enough to plan.** Every agent step is a structured
+response validated against a schema; a model that cannot hold that shape does
+not degrade gracefully, it fails the task. Measured on a 2-core CPU-only host
+against local Ollama:
+
+| Model | Result |
+|---|---|
+| `llama3.2` (3B) | fails - answers the question with invented disk figures instead of producing a plan, and emits invalid JSON |
+| `phi3` (3.8B) | plans validly, but Vishnu rejects every plan; fails after the replan budget, 4 inference calls, 29 minutes |
+| Hosted mid-tier (`gpt-4o-mini` class) | expected to be the practical floor |
+
+That llama3.2 run is worth understanding rather than working around: it
+fabricated filesystems and sizes it had no way to know. Scrappy rejected the
+output and failed the task instead of acting on it, which is the intended
+behaviour - but it means **structured-output validation is load-bearing**, not
+a formality.
+
+Also budget for latency. On CPU-only hardware each planning call took roughly
+five minutes, so the default `SCRAPPY_MODEL_TIMEOUT_SECONDS=60` will abort the
+task before the first plan arrives. Raise it, or use a GPU or a hosted endpoint.
+
 ---
 
 ## Configuration
@@ -294,6 +315,17 @@ Stated plainly, because a security model you cannot see the edges of is not one:
 - **A model can still be wrong inside its permissions.** Nothing here prevents
   a well-formed, correctly-authorised, unhelpful action. The controls bound
   *blast radius*, not correctness.
+- **Small local models do not clear the bar.** See *Connecting a real model*.
+  A 3B model failed to plan at all; a 3.8B one planned but could not satisfy
+  Vishnu and exhausted its replan budget. The failure is loud, bounded and
+  audited - the budgets did exactly their job - but it is still a failure.
+  The end-to-end diagnostic milestone is demonstrated on the `mock` provider;
+  on this hardware neither local model completed it.
+- **Approving a write outside the workspace does not grant it.** Policy raises
+  an approval request for such a write, and the path guard refuses it anyway
+  unless the destination is a configured write root. The operator is asked a
+  question their "yes" cannot honour. It fails closed, so this is a wart in the
+  approval flow rather than a hole in it.
 
 ---
 

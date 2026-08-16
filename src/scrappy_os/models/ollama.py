@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
@@ -29,6 +30,18 @@ from scrappy_os.models.base import (
 from scrappy_os.observability.logging import get_logger
 
 logger = get_logger("provider.ollama")
+
+#: Whether the in-flight request should ask Ollama for JSON mode.
+#:
+#: This is a ContextVar rather than an attribute on the provider because one
+#: provider instance is deliberately shared by the whole runtime (ModelRouter
+#: keeps a single instance so the HTTP connection pool is shared) while the API
+#: runs objectives concurrently via ``Runtime.spawn``. An instance attribute
+#: set around an ``await`` leaks across those tasks in both directions: a plain
+#: ``generate`` gets forced into JSON mode and returns mangled prose, or a
+#: structured call silently loses JSON mode and its schema failure rate goes
+#: up. asyncio copies the context per Task, so a ContextVar cannot leak.
+_JSON_MODE: ContextVar[bool] = ContextVar("ollama_json_mode", default=False)
 
 
 class OllamaProvider(ModelProvider):
@@ -51,7 +64,6 @@ class OllamaProvider(ModelProvider):
         self._max_tokens = max_tokens
         self._client = client
         self._owns_client = client is None
-        self._force_json = False
 
     @property
     def info(self) -> ProviderInfo:
@@ -92,7 +104,7 @@ class OllamaProvider(ModelProvider):
             "stream": False,
             "options": options,
         }
-        if self._force_json:
+        if _JSON_MODE.get():
             body["format"] = "json"
 
         started = time.perf_counter()
@@ -147,7 +159,7 @@ class OllamaProvider(ModelProvider):
         max_repairs: int = 1,
     ) -> SchemaT:
         """Same contract as the base class, with Ollama's JSON mode enabled."""
-        self._force_json = True
+        token = _JSON_MODE.set(True)
         try:
             return await super().generate_structured(
                 messages,
@@ -157,7 +169,7 @@ class OllamaProvider(ModelProvider):
                 max_repairs=max_repairs,
             )
         finally:
-            self._force_json = False
+            _JSON_MODE.reset(token)
 
     async def health_check(self) -> ProviderHealth:
         started = time.perf_counter()
