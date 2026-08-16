@@ -144,6 +144,15 @@ class EventType(StrEnum):
 
     SECURITY_DENIED = "security.denied"
 
+    AUTH_SUCCEEDED = "auth.succeeded"
+    """A credential was presented and resolved to an actor."""
+
+    AUTH_FAILED = "auth.failed"
+    """A credential was missing, malformed or unrecognised. Never carries the credential."""
+
+    AUTHZ_DENIED = "authz.denied"
+    """A known actor lacked the scope required for the operation."""
+
     AGENT_DECIDED = "agent.decided"
     ROLLBACK_STARTED = "rollback.started"
     ROLLBACK_COMPLETED = "rollback.completed"
