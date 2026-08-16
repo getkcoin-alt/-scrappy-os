@@ -3,6 +3,11 @@
 Uses FastAPI's TestClient, which drives the real lifespan - so the runtime
 actually starts, the store is real, and the assertions are about the shipped
 behaviour rather than a mock of it.
+
+Since v0.2 every endpoint but ``/health`` requires a bearer token, so the client
+fixture below authenticates by default. The tests that assert on the *absence*
+of a credential live in ``tests/security/test_api_authentication.py``; keeping
+them apart means a change to this fixture cannot accidentally weaken them.
 """
 
 from __future__ import annotations
@@ -11,17 +16,22 @@ from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from scrappy_os.core.config import ScrappySettings
 from scrappy_os.interface.api import create_app
 
 pytestmark = pytest.mark.integration
 
+API_TOKEN = "test-token-with-enough-entropy-to-be-realistic"
+
 
 @pytest.fixture
 def client(settings: ScrappySettings) -> Iterator[TestClient]:
     settings.ensure_directories()
-    with TestClient(create_app(settings, with_heartbeat=False)) as test_client:
+    settings.api_token = SecretStr(API_TOKEN)
+    app = create_app(settings, with_heartbeat=False)
+    with TestClient(app, headers={"Authorization": f"Bearer {API_TOKEN}"}) as test_client:
         yield test_client
 
 
