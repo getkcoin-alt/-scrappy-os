@@ -25,6 +25,11 @@ from scrappy_os.core.errors import ConfigurationError
 
 ProviderName = Literal["mock", "openai", "ollama"]
 
+#: Fields excluded from every human-readable rendering of the settings.
+#: :meth:`ScrappySettings.redacted_dict` re-adds each one as a presence marker,
+#: so adding a secret here hides its value without hiding its existence.
+SECRET_FIELDS: frozenset[str] = frozenset({"openai_api_key", "api_token"})
+
 DEFAULT_READ_ROOTS = "/etc,/proc,/sys,/var/log,/usr/share"
 DEFAULT_SHELL_ALLOWLIST = (
     "ls,cat,head,tail,grep,find,df,du,free,uptime,ps,systemctl,journalctl,"
@@ -142,6 +147,24 @@ class ScrappySettings(BaseSettings):
     # -- runtime ------------------------------------------------------------
     api_host: str = Field(default="127.0.0.1")
     api_port: int = Field(default=8787, ge=1, le=65535)
+    api_token: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SCRAPPY_API_TOKEN", "api_token"),
+        description=(
+            "Bearer token for the HTTP API. Unset means no credential is valid and every "
+            "authenticated endpoint refuses, which is not the same as being open."
+        ),
+    )
+    api_token_actor_id: str = Field(
+        default="api-token",
+        max_length=128,
+        description="Principal id recorded in the audit trail for the configured token.",
+    )
+    api_token_scopes_raw: str = Field(
+        default="",
+        validation_alias=AliasChoices("SCRAPPY_API_TOKEN_SCOPES", "api_token_scopes"),
+        description="Comma-separated scopes for the API token. Empty grants every scope.",
+    )
     heartbeat_seconds: float = Field(default=30.0, gt=0, le=3600)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["console", "json"] = "console"
@@ -188,6 +211,42 @@ class ScrappySettings(BaseSettings):
     def api_is_local_only(self) -> bool:
         return self.api_host in {"127.0.0.1", "localhost", "::1"}
 
+    @property
+    def api_token_scopes(self) -> frozenset[Any]:
+        """Scopes granted to the configured API token.
+
+        An empty setting grants every scope: a single-token deployment that has
+        not opted into narrowing should behave as the operator expects, and
+        narrowing is the explicit act. Unknown scope names raise rather than
+        being dropped - see :func:`scrappy_os.security.authz.parse_scopes`.
+        """
+        from scrappy_os.core.identity import all_scopes
+        from scrappy_os.security.authz import parse_scopes
+
+        raw = self.api_token_scopes_raw.strip()
+        if not raw:
+            return all_scopes()
+        return parse_scopes(raw)
+
+    @property
+    def api_auth_configured(self) -> bool:
+        """Whether any credential can authenticate to the API.
+
+        False does not mean "open": it means every authenticated endpoint has no
+        acceptable credential and refuses. See :mod:`scrappy_os.security.authn`.
+        """
+        return self.api_token is not None and bool(self.api_token.get_secret_value())
+
+    @property
+    def api_exposure_is_unsafe(self) -> bool:
+        """Bound off-host *and* unable to authenticate anyone.
+
+        The combination doctor shouts about. Either half alone is a considered
+        choice; together they are a control plane reachable by strangers with no
+        way to tell them apart.
+        """
+        return not self.api_is_local_only and not self.api_auth_configured
+
     def ensure_directories(self) -> None:
         """Create the data and workspace trees with private permissions.
 
@@ -208,8 +267,10 @@ class ScrappySettings(BaseSettings):
         Secrets are replaced with a presence marker so operators can tell
         "unset" from "set" without the value leaking.
         """
-        data = self.model_dump(mode="json", exclude={"openai_api_key"})
+        data = self.model_dump(mode="json", exclude=set(SECRET_FIELDS))
         data["openai_api_key"] = "<set>" if self.openai_api_key else "<unset>"
+        data["api_token"] = "<set>" if self.api_auth_configured else "<unset>"
+        data["api_token_scopes"] = sorted(str(scope) for scope in self.api_token_scopes)
         data["allowed_read_roots"] = [str(path) for path in self.allowed_read_roots]
         data["shell_allowlist"] = list(self.shell_allowlist)
         data["shell_denylist"] = list(self.shell_denylist)
@@ -234,14 +295,86 @@ def load_yaml_overrides(path: Path) -> dict[str, Any]:
     return raw
 
 
+def _env_names_for(field_name: str) -> set[str]:
+    """Every environment variable that can populate ``field_name``.
+
+    Mirrors what pydantic-settings itself would look for: the declared
+    :class:`~pydantic.AliasChoices` when a field has them, otherwise the
+    prefixed field name.
+    """
+    field = ScrappySettings.model_fields.get(field_name)
+    if field is None:
+        return set()
+    alias = field.validation_alias
+    if isinstance(alias, AliasChoices):
+        return {str(choice) for choice in alias.choices if isinstance(choice, str)}
+    if isinstance(alias, str):
+        return {alias}
+    return {f"SCRAPPY_{field_name}"}
+
+
+def _field_for_key(key: str) -> str | None:
+    """Resolve a YAML key to a model field, whether it used the name or an alias."""
+    if key in ScrappySettings.model_fields:
+        return key
+    lowered = key.lower()
+    for name in ScrappySettings.model_fields:
+        if any(alias.lower() == lowered for alias in _env_names_for(name)):
+            return name
+    return None
+
+
+def _environment_supplied(field_name: str, dotenv_keys: frozenset[str]) -> bool:
+    """Whether the process environment or ``.env`` already sets this field."""
+    present = {key.upper() for key in os.environ} | {key.upper() for key in dotenv_keys}
+    return any(name.upper() in present for name in _env_names_for(field_name))
+
+
 def load_settings(config_file: Path | None = None, **overrides: Any) -> ScrappySettings:
-    """Build settings from YAML (optional), the environment and explicit kwargs."""
+    """Build settings from YAML (optional), the environment and explicit kwargs.
+
+    Precedence is the documented one: explicit kwargs, then the environment,
+    then ``.env``, then YAML, then defaults.
+
+    Getting that ordering right takes the loop below rather than a single
+    ``dict.update``. YAML values have to reach the model as constructor
+    arguments, and pydantic-settings ranks constructor arguments *above* the
+    environment - so passing the file's contents through verbatim would silently
+    invert two layers, and a stale ``api_token`` in ``config/scrappy.yaml``
+    would quietly beat the one a systemd ``EnvironmentFile`` supplies. An
+    operator rotating a credential would then be rotating the wrong one. So a
+    YAML value is dropped when the environment already speaks for that field.
+    """
     values: dict[str, Any] = {}
     candidate = config_file or _default_config_file()
     if candidate is not None:
-        values.update(load_yaml_overrides(candidate))
+        dotenv_keys = _dotenv_keys()
+        for key, value in load_yaml_overrides(candidate).items():
+            field_name = _field_for_key(key)
+            if field_name is None:
+                # Unknown keys are still passed through; extra="ignore" drops
+                # them, and failing a boot over a stale comment is worse.
+                values[key] = value
+                continue
+            if _environment_supplied(field_name, dotenv_keys):
+                continue
+            values[field_name] = value
     values.update(overrides)
     return ScrappySettings(**values)
+
+
+def _dotenv_keys() -> frozenset[str]:
+    """Keys defined in the ``.env`` file, which also outranks YAML."""
+    configured = ScrappySettings.model_config.get("env_file")
+    path = Path(configured) if isinstance(configured, str | os.PathLike) else Path(".env")
+    if not path.exists():
+        return frozenset()
+    try:
+        from dotenv import dotenv_values
+
+        return frozenset(key for key in dotenv_values(path) if key)
+    except (OSError, ValueError):  # pragma: no cover - unreadable .env
+        return frozenset()
 
 
 def _default_config_file() -> Path | None:
@@ -268,6 +401,7 @@ def reset_settings_cache() -> None:
 
 
 __all__ = [
+    "SECRET_FIELDS",
     "ProviderName",
     "ScrappySettings",
     "get_settings",
