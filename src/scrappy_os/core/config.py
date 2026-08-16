@@ -235,7 +235,11 @@ class ScrappySettings(BaseSettings):
         False does not mean "open": it means every authenticated endpoint has no
         acceptable credential and refuses. See :mod:`scrappy_os.security.authn`.
         """
-        return self.api_token is not None and bool(self.api_token.get_secret_value())
+        # Stripped for the same reason as `build_authenticator`: a whitespace-only
+        # token cannot be presented in a well-formed Authorization header, so
+        # reporting it as configured would tell doctor the opposite of what the
+        # authenticator will actually do.
+        return self.api_token is not None and bool(self.api_token.get_secret_value().strip())
 
     @property
     def api_exposure_is_unsafe(self) -> bool:

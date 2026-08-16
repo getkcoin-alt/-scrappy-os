@@ -298,3 +298,24 @@ def test_generated_tokens_are_unique_and_long() -> None:
     tokens = {generate_token() for _ in range(50)}
     assert len(tokens) == 50
     assert all(len(token) >= 32 for token in tokens)
+
+
+@pytest.mark.parametrize("blank", ["   ", "\t", "\n", " \t "])
+def test_a_whitespace_only_token_builds_no_credential(blank: str) -> None:
+    """A blank token must be treated as absent, not as a credential nobody can use.
+
+    It is truthy, so it used to produce a StaticTokenAuthenticator holding a
+    secret that could never be presented: `parse_bearer` splits the header on
+    whitespace and demands exactly two parts, so `Authorization: Bearer    `
+    is malformed by construction. The deployment then reports itself
+    authenticated while refusing every caller. Failing closed *and* saying so
+    is the only honest combination.
+    """
+    authenticator = build_authenticator(SecretStr(blank))
+
+    assert isinstance(authenticator, NullAuthenticator)
+    assert authenticator.configured is False
+    assert authenticator.credential_count == 0
+
+    with pytest.raises(AuthenticationFailed):
+        authenticator.authenticate(f"Bearer {blank}")

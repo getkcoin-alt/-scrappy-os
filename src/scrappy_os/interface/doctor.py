@@ -294,12 +294,27 @@ def _check_api_authentication(settings: ScrappySettings) -> CheckResult:
     token = settings.api_token
     length = len(token.get_secret_value()) if token else 0
     if length < MIN_TOKEN_LENGTH:
+        generate = 'python -c "import secrets; print(secrets.token_urlsafe(32))"'
+        if not settings.api_is_local_only:
+            # Same reasoning as the no-token branch above. A guessable secret on
+            # an interface strangers can reach is not a weaker version of
+            # authentication, it is the absence of it with extra steps, and a
+            # deployment pipeline that only checks doctor's exit code must not
+            # be told this is fine.
+            return CheckResult(
+                "api authentication",
+                CheckStatus.FAIL,
+                f"SCRAPPY_API_TOKEN is only {length} characters and the API binds "
+                f"{settings.api_host}:{settings.api_port}, reachable off this host",
+                f"A token this short is brute-forceable. Use at least {MIN_TOKEN_LENGTH} "
+                f"characters from `{generate}`, or bind loopback with "
+                "SCRAPPY_API_HOST=127.0.0.1.",
+            )
         return CheckResult(
             "api authentication",
             CheckStatus.WARN,
             f"SCRAPPY_API_TOKEN is only {length} characters",
-            f"Use at least {MIN_TOKEN_LENGTH}, ideally from `python -c "
-            '"import secrets; print(secrets.token_urlsafe(32))"`.',
+            f"Use at least {MIN_TOKEN_LENGTH}, ideally from `{generate}`.",
         )
 
     scopes = sorted(str(scope) for scope in settings.api_token_scopes)

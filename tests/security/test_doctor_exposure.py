@@ -115,3 +115,69 @@ def test_exposure_property_requires_both_halves() -> None:
     assert exposed_token.api_exposure_is_unsafe is False
     assert local_no_token.api_exposure_is_unsafe is False
     assert local_token.api_exposure_is_unsafe is False
+
+
+# ---------------------------------------------------------------------------
+# A credential can be present and still be no credential at all.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_guessable_token_on_an_exposed_bind_is_a_failure(
+    settings: ScrappySettings,
+) -> None:
+    """A six-character secret facing the network is the no-token case wearing a hat.
+
+    This previously reported WARN and let doctor exit 0, so a deployment
+    pipeline gating on the exit code would ship it. The exposure is materially
+    the same as having no token: the whole keyspace is searchable.
+    """
+    settings.api_host = "0.0.0.0"
+    settings.api_token = SecretStr("abc123")
+
+    report = await _report(settings)
+    result = _check(report, "api authentication")
+    assert result.status is CheckStatus.FAIL  # type: ignore[attr-defined]
+    assert report.healthy is False  # type: ignore[attr-defined]
+
+
+async def test_a_guessable_token_on_loopback_is_only_a_warning(
+    settings: ScrappySettings,
+) -> None:
+    """The escalation must be driven by reachability, not by length alone."""
+    settings.api_host = "127.0.0.1"
+    settings.api_token = SecretStr("abc123")
+
+    report = await _report(settings)
+    assert _check(report, "api authentication").status is CheckStatus.WARN  # type: ignore[attr-defined]
+    assert report.healthy is True  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("blank", ["   ", "\t", "\n", " \t "])
+async def test_a_whitespace_only_token_is_reported_as_no_token(
+    settings: ScrappySettings, blank: str
+) -> None:
+    """Whitespace cannot be presented in a bearer header, so it is not a credential.
+
+    `parse_bearer` splits the header on whitespace and requires exactly two
+    parts, so no client can ever send this value. Reporting it as configured
+    would promise an operator authentication that refuses every caller.
+    """
+    settings.api_host = "127.0.0.1"
+    settings.api_token = SecretStr(blank)
+
+    assert settings.api_auth_configured is False
+    result = _check(await _report(settings), "api authentication")
+    assert result.status is CheckStatus.WARN  # type: ignore[attr-defined]
+    assert "no SCRAPPY_API_TOKEN" in result.detail  # type: ignore[attr-defined]
+
+
+async def test_a_whitespace_only_token_on_an_exposed_bind_still_fails(
+    settings: ScrappySettings,
+) -> None:
+    """The dangerous combination must not be masked by a token-shaped blank."""
+    settings.api_host = "0.0.0.0"
+    settings.api_token = SecretStr("   ")
+
+    report = await _report(settings)
+    assert _check(report, "api binding").status is CheckStatus.FAIL  # type: ignore[attr-defined]
+    assert report.healthy is False  # type: ignore[attr-defined]

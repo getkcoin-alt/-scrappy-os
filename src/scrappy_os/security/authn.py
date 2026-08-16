@@ -246,7 +246,14 @@ def build_authenticator(
     A deployment with no token gets a :class:`NullAuthenticator`, which refuses
     everything. It does not get an open door.
     """
-    if token is None or not token.get_secret_value():
+    # `.strip()` matters as much as the None check. A token that is only
+    # whitespace is truthy, so it would build a real authenticator holding a
+    # credential no client can ever present: `parse_bearer` splits the header on
+    # whitespace and demands exactly two parts, so `Authorization: Bearer    `
+    # is malformed by construction. The result is a deployment that reports
+    # itself configured and refuses everyone. Treating it as unconfigured is
+    # both accurate and the safer of the two failures.
+    if token is None or not token.get_secret_value().strip():
         return NullAuthenticator()
     return StaticTokenAuthenticator(
         [
