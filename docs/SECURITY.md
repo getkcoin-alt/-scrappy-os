@@ -27,6 +27,7 @@ flowchart TB
 
     subgraph SEMI["Semi-trusted: authenticated but fallible"]
         HUMAN[Human operator]
+        APICLIENT[API client bearing a token]
     end
 
     subgraph TRUSTED["Trusted"]
@@ -40,6 +41,9 @@ flowchart TB
     MEM -->|delimited as data| MODEL
     HTTP -->|delimited as data| MODEL
     HUMAN -->|approves one operation| GATE
+    APICLIENT -->|bearer token| AUTH{Authentication}
+    AUTH -->|verified Actor + scope| GATE
+    AUTH -->|401 / 403| REJECT[Refused and audited]
     CFG --> GATE
     GATE -->|allow| CODE
     CODE --> OS
@@ -59,6 +63,13 @@ output is rendered into prompts inside explicit `BEGIN/END TOOL OUTPUT
 why approvals name the *exact* operation, expire, and are single-use. An
 operator approving "restart a service" without being told which service has not
 meaningfully approved anything.
+
+An API client holding a valid token sits in the same band, and for a sharper
+reason: a bearer token proves possession of a secret, not that the holder is the
+party it was issued to. A stolen token is indistinguishable from a legitimate
+one. That is why authentication grants *scoped* access rather than trust, and
+why every privileged operation still faces the policy engine and the approval
+gate behind it. Authenticating does not exempt anyone from layers 1-7.
 
 **Trusted.** Configuration, the code, and the kernel. If an attacker can edit
 `.env` or the sudoers file, this document is already moot - protect them with
@@ -85,8 +96,10 @@ look identical at the transport layer.
 
 ## Defence in depth
 
-Seven layers. Every one of them has to fail for a dangerous operation to reach
-the machine.
+Eight layers. Every one of them has to fail for a dangerous operation to reach
+the machine. Layer 8 (authentication) was added in v0.2 and sits *in front* of
+the others: it decides whether a request enters the system at all, where layers
+1-7 bound what a request that got in may do.
 
 ### 1. Typed schemas
 
@@ -177,28 +190,130 @@ recorded as `security.denied` events.
 Redaction happens at the sink, not the call site. Relying on each caller to
 remember is how credentials end up in logs.
 
+### 8. Authentication and actor identity
+
+Added in v0.2. Every HTTP endpoint except `GET /health` requires a bearer token
+and a scope.
+
+**The assumption this replaced.** v0.1 said the API was safe because it was
+bound to loopback. That is a real control and it still applies, but it answers
+"can you reach me", never "who are you". Anything on the host - another service,
+a compromised dependency, a user with a shell, a browser following a link to
+`127.0.0.1:8787` - was a fully privileged caller. And because the API accepted an
+`actor` string in the request body, the audit trail recorded what callers
+*claimed* rather than what was verified.
+
+**The boundary now.** `interface/security.py` is the only module that reads the
+`Authorization` header. It produces a `RequestSecurityContext` holding a verified
+`Actor`, which travels with the request into the task, the orchestrator, policy
+evaluation, tool calls and every audit row. There is no global "current actor":
+a global would be wrong under concurrency and worse for `POST /tasks`, which
+creates an asyncio task outliving the request that spawned it.
+
+| Endpoint | Authenticated | Scope |
+|---|---|---|
+| `GET /health` | optional | none — liveness only; detail needs `system:read` |
+| `GET /status` | yes | `system:read` |
+| `POST /tasks` | yes | `task:create` |
+| `GET /tasks/{id}` | yes | `task:read` |
+| `GET /tasks/{id}/events` | yes | `task:read` |
+| `GET /approvals` | yes | `approval:read` |
+| `POST /approvals/{id}` | yes | `approval:grant` |
+| `GET /audit` | yes | `audit:read` |
+
+**Fail-closed.** No configured token means no *valid* token — not no checking.
+The API starts and refuses every authenticated request. Absent configuration
+must never mean absent enforcement.
+
+**401 vs 403.** 401 means we do not know who you are; all four ways to fail
+authentication give the client the same answer, because distinguishing them
+tells an attacker which guess was closer. 403 means we know who you are and you
+may not do this, and names the missing scope — the caller already authenticated,
+so that is a fix instruction rather than a leak. Authorization is decided
+*before* the resource is looked up, so a 404 cannot become an existence oracle
+for task ids.
+
+**Identity is never taken from the client.** `actor` was removed from the task
+body and `decided_by` from the approval body. `extra="forbid"` turns a v0.1
+client still sending them into an explicit 422, rather than silently ignoring a
+field it believes is working.
+
+**Agents are not principals.** A `ToolCall` carries both `actor` (the agent that
+proposed the step, e.g. `agent:brahma`) and `identity` (the principal whose task
+it runs in). An agent holds no scopes and can never acquire any. A model that
+decides to restart nginx did so inside somebody's task, and that somebody
+answers for it.
+
+**Why the CLI does not authenticate.** The CLI drives the runtime in-process. It
+runs as a user who can already read the token from `.env`, open the SQLite audit
+trail and restart the service, so checking a credential that the caller can read
+off disk would enforce nothing — it would only make the boundary *look* stronger
+than it is. Instead the CLI's trust comes from the OS and is labelled as such:
+`auth_method=local_process`, distinguishable at a glance from a token-bearing
+API caller. The real boundary there is file permissions: `0700` on the data
+directory, `0600` on the database.
+
+### What a bearer token is not
+
+Being explicit, because this is the control most likely to be over-trusted:
+
+- **It is a shared secret sent on every request.** Anyone who observes one can
+  replay it. There is no nonce, no timestamp and no per-request signature, so a
+  captured request is a valid request until the token is rotated.
+- **It does not authenticate the server to the client.** A client pointed at the
+  wrong host hands its credential to whoever answers.
+- **It carries no integrity over the request body.** Plaintext HTTP is
+  interceptable and modifiable in flight; TLS is what fixes that, and Scrappy OS
+  does not terminate TLS itself.
+- **There is no expiry.** A token is valid until an operator removes it, so
+  theft is permanent until noticed. Rotation is manual: edit the configuration
+  and restart.
+- **Revocation is a restart.** Credentials are read once at app construction.
+- **One token means one identity.** Everything authenticating with it is the
+  same principal in the audit trail. Per-human attribution needs per-human
+  credentials, which the `TokenCredential` list supports but v0.2 does not yet
+  configure.
+
+This is why loopback remains the default bind and why `doctor` FAILs on a
+non-loopback bind with no credential. Authentication makes remote exposure
+*survivable*; it does not make it advisable.
+
 ## Secret handling
 
-- API keys live in `pydantic.SecretStr` and are unwrapped only when building an
-  Authorization header.
+- API keys and the API token live in `pydantic.SecretStr` and are unwrapped only
+  when building an Authorization header or comparing a presented credential.
 - The logging processor chain scrubs every event before rendering - by key
   (`api_key`, `password`, `token`, …) and by value shape (`sk-…`, `ghp_…`,
   `AKIA…`, JWTs, PEM private keys, `Bearer …`).
 - Audit payloads are redacted before persist. There is no code path that writes
   a raw payload.
-- `scrappy config show` and `GET /status` print `<set>` / `<unset>`.
+- `scrappy config show`, `scrappy doctor` and `GET /status` print `<set>` /
+  `<unset>`. `SECRET_FIELDS` drives that redaction, and a test asserts every
+  `SecretStr` field on the settings model appears in it — so a future secret
+  cannot be added and left rendering in full.
+- Authentication failures record a *reason category*, never the presented
+  credential. A guessed token is attacker-controlled text, and a log that stores
+  it is a place to inject content some later viewer will render.
+- The `Authorization` header never reaches an audit record. Request provenance
+  is limited to method, path and peer address, built as a structure that has no
+  header field to accidentally populate.
 - Child processes never inherit them.
 - Large tool output is stored as a SHA-256 digest plus a bounded preview, so
   the audit database does not become a second copy of `/etc`.
 
-## What is *not* protected in v0.1
+## What is *not* protected in v0.2
 
 Stated plainly. A security model whose edges you cannot see is not one.
 
 | Gap | Consequence | Mitigation today |
 |---|---|---|
-| **API has no authentication** | Anyone who can reach the port can submit tasks | Binds 127.0.0.1; `doctor` warns on non-local; use an authenticating proxy or SSH tunnel |
-| **No multi-user model** | One actor identity; no per-user permissions | Run one instance per trust domain |
+| **Bearer tokens are replayable** | A captured request stays valid until the token is rotated | Loopback default; terminate TLS in front of any remote bind; rotate on suspicion |
+| **No token expiry or revocation list** | Theft is permanent until an operator notices and restarts | Rotation is manual: change config, restart. Short-lived credentials are a roadmap item |
+| **No server authentication** | A client pointed at the wrong host hands over its credential | TLS with a verified certificate, terminated by a proxy. mTLS is the planned fix |
+| **One token, one identity** | Everything using it is the same principal in the audit trail | Run separate instances per trust domain; the credential list already supports more |
+| **Scopes are coarse** | `task:create` permits any objective, at any ceiling the body asks for | The risk ceiling, policy engine and approval gate still bound what that task can *do* |
+| **No per-actor policy** | Every authenticated principal faces identical risk rules | `PolicyContext` already receives the actor; no rule consults it yet |
+| **No rate limiting** | Token guessing and task flooding are unthrottled | Loopback default; put a proxy in front for anything else |
 | **No signed audit chain** | An attacker with write access to the DB can alter history | File mode 0600; ship logs off-host if it matters |
 | **Approval is per-operation** | A ten-step privileged plan asks ten times | Deliberate for v0.1; plan-level approval is a roadmap item |
 | **Rollback is best-effort** | `shell.run` and `process.kill` cannot be undone | Tools declare this honestly via `RollbackSpec` |

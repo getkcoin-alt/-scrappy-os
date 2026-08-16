@@ -116,20 +116,56 @@ the way you would audit any other privilege grant.
 
 ## 6. Exposing the API (and why you probably should not)
 
-The API has **no authentication**. It binds to `127.0.0.1` and the unit denies
-outbound IP traffic by default.
+Since v0.2 the API authenticates callers with a bearer token, and binds to
+`127.0.0.1` regardless. Both still matter, because they solve different problems:
+the token answers *who are you*, the loopback bind answers *can you reach me at
+all*, and only the second one survives a stolen credential.
 
-If a remote operator needs access, terminate authentication in front of it -
-an SSH tunnel is the simplest correct answer:
+Generate a token and put it in the unit's environment file, never in the YAML
+config and never on a command line:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# /etc/scrappy-os/scrappy.env, mode 0600, owned by root
+SCRAPPY_API_TOKEN=<paste>
+```
+
+Without a token the API still starts, and every endpoint except `GET /health`
+returns 401. That is deliberate - an unconfigured deployment refuses rather than
+falls open - but it does mean a service that suddenly answers 401 everywhere has
+probably lost its environment file.
+
+If a remote operator needs access, an SSH tunnel remains the simplest correct
+answer, and is still preferable to exposing the port:
 
 ```bash
 ssh -N -L 8787:127.0.0.1:8787 operator@server
 ```
 
-For anything more permanent, put an authenticating reverse proxy (mTLS, OIDC,
-whatever your organisation already runs) in front, keep Scrappy OS bound to
-loopback, and never set `SCRAPPY_API_HOST=0.0.0.0`. `scrappy doctor` reports a
-non-local bind as a warning for exactly this reason.
+Why a token is not a licence to bind `0.0.0.0`: it is a shared secret replayed
+on every request, this process does not terminate TLS, and there is no expiry or
+revocation short of a restart. Anyone who observes one request has a working
+credential until you rotate it. For anything permanent, put a TLS-terminating,
+authenticating reverse proxy (mTLS, OIDC, whatever your organisation already
+runs) in front and keep Scrappy OS on loopback.
+
+`scrappy doctor` now **fails** - not warns - on a non-loopback bind with no
+token configured, because that combination is reachable by strangers and unable
+to tell them apart.
+
+### Rotating the token
+
+Credentials are read once at startup, so rotation is: change the environment
+file, then restart.
+
+```bash
+sudoedit /etc/scrappy-os/scrappy.env
+sudo systemctl restart scrappy-os
+```
+
+There is no revocation list, so the old token is valid right up until that
+restart. Treat a suspected leak as urgent.
 
 ## 7. Ongoing operation
 

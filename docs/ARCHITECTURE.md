@@ -24,22 +24,30 @@ engine" a *structural* property rather than a convention someone might forget.
 
 ```
 src/scrappy_os/
-├── core/           Settings, typed models, enums, errors, event bus
+├── core/           Settings, typed models, enums, errors, event bus, actor identity
 ├── models/         Model providers (mock, OpenAI-compatible, Ollama) + router
 ├── agents/         Brahma, Vishnu, Mahesh + the schemas they may emit
 ├── brain/          Orchestration loop and execution budgets
 ├── tools/          Tool protocol, registry, executor, and the tools themselves
-├── security/       Paths, risk classification, policy, approvals, audit
+├── security/       Paths, risk classification, policy, approvals, audit, authn, authz
 ├── memory/         Working, episodic, semantic; the SQLite store
 ├── heart/          Runtime supervisor: lifecycle and health
 ├── breath/         Heartbeat
-├── interface/      CLI, HTTP API, doctor, terminal formatting
+├── interface/      CLI, HTTP API, request security, doctor, terminal formatting
 └── observability/  structlog configuration and secret redaction
 ```
 
 Dependencies point inward: `interface` → `heart` → `brain` → `agents` →
 `models`, with `core` and `security` underneath everything. No module imports
 its own dependent.
+
+`core/identity.py` sits at the very bottom, below `core/models.py`. That looks
+odd for something security-shaped until you notice that `Objective`, `ToolCall`
+and `ApprovalDecision` all *embed* an `Actor` - identity is domain vocabulary,
+not a mechanism. `security/authn.py` (establishing identity) and
+`security/authz.py` (consulting it) depend on that vocabulary, never the
+reverse. Putting `Actor` in `security/` instead would create an import cycle the
+moment a core model needed to name one.
 
 ## The orchestration loop
 
@@ -317,18 +325,26 @@ something smuggled into v0.1.
 
 ```mermaid
 flowchart TD
-    OBJ[Objective<br/>text, actor, max_risk] --> TASK[Task<br/>UUID, state]
+    REQ[HTTP request<br/>Authorization: Bearer] --> AUTHN{Authenticate}
+    AUTHN -->|401| REJ[Refused + audited]
+    AUTHN --> SEC[RequestSecurityContext<br/>verified Actor]
+    SEC --> AUTHZ{Scope check}
+    AUTHZ -->|403| REJ
+    AUTHZ --> OBJ
+    OBJ[Objective<br/>text, identity, max_risk] --> TASK[Task<br/>UUID, state]
     TASK --> CTX[Context<br/>tools filtered by ceiling]
     CTX --> PROP[PlanProposal<br/>Brahma]
     PROP --> REV[ReviewedPlan<br/>Vishnu]
     REV --> STEP[PlanStep]
-    STEP --> CALL[ToolCall<br/>task_id, args, actor, risk]
+    STEP --> CALL[ToolCall<br/>task_id, args, agent actor, principal identity, risk]
     CALL --> VERDICT[PolicyVerdict]
     VERDICT --> RES[ToolResult<br/>success, duration, output]
     RES --> OBS[Observation]
     OBS --> VER[Verification<br/>Vishnu]
     VER --> OUT[TaskOutcome<br/>conclusion, budget, refusals]
 
+    AUTHN -.-> AUD
+    AUTHZ -.-> AUD
     CALL -.-> AUD[(audit_events<br/>tool_calls)]
     VERDICT -.-> AUD
     RES -.-> AUD
@@ -337,6 +353,14 @@ flowchart TD
 
 Every arrow is a typed Pydantic model. Every dotted arrow is a durable record.
 
+The `Actor` established at the top of that diagram is carried the whole way
+down. It is passed explicitly - through `Objective.identity` into the
+orchestrator, onto each `ToolCall`, into `PolicyContext` and `ToolContext`, and
+onto the `actor_id` / `actor_type` / `auth_method` columns of every audit row.
+Nothing consults a module-level "current actor", because `POST /tasks` returns
+202 and leaves an asyncio task running after the request that authenticated it
+has finished; a global would be read by the wrong task under any concurrency.
+
 ## Extension points
 
 | To add… | Do this | Not this |
@@ -344,6 +368,9 @@ Every arrow is a typed Pydantic model. Every dotted arrow is a durable record.
 | A machine capability | Subclass `Tool`, register it ([TOOL_PROTOCOL](TOOL_PROTOCOL.md)) | Add a shell command |
 | A model backend | Implement `ModelProvider`, `register_provider` | Special-case it in an agent |
 | A different transport | Implement the `EventBus` protocol | Rewrite the orchestrator |
+| An authentication method | Implement the `Authenticator` protocol | Add a branch to the token checker |
+| More API credentials | Add `TokenCredential` entries | Introduce a second code path |
+| Per-actor policy | Read `PolicyContext.actor` in a rule | Check identity in an endpoint |
 | Durable storage | Write a second `Store` | Add an ORM |
 | Semantic recall | Implement `SemanticMemory` | Change how agents read memory |
 | Different agent behaviour | Edit `prompts/*.md` | Fork the agent classes |

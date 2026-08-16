@@ -12,8 +12,8 @@ model_name: gpt-4o-mini
 model_timeout_seconds: 60
 model_temperature: 0.1
 
-# Secrets do NOT belong here. Set OPENAI_API_KEY in the environment or in a
-# root-owned .env; this file is easy to commit by accident.
+# Secrets do NOT belong here. Set OPENAI_API_KEY and SCRAPPY_API_TOKEN in the
+# environment or in a root-owned .env; this file is easy to commit by accident.
 openai_base_url: https://api.openai.com/v1
 ollama_base_url: http://127.0.0.1:11434
 

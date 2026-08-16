@@ -163,7 +163,9 @@ The settings that matter most:
 | `SCRAPPY_SHELL_ALLOWLIST` | *(see `.env.example`)* | Empty disables `shell.run` entirely |
 | `SCRAPPY_SHELL_DENYLIST` | `rm,dd,mkfs,shutdown,…` | Never runnable, even with approval |
 | `SCRAPPY_ALLOW_APPROVALS` | `true` | `false` denies privileged work outright |
-| `SCRAPPY_API_HOST` | `127.0.0.1` | The API has no authentication |
+| `SCRAPPY_API_HOST` | `127.0.0.1` | Loopback default; authentication is not a reason to change it |
+| `SCRAPPY_API_TOKEN` | *(unset)* | Bearer token for the API. Unset = no valid credential, so every authenticated endpoint refuses |
+| `SCRAPPY_API_TOKEN_SCOPES` | *(all)* | Narrow the token, e.g. `task:read,audit:read` |
 
 `scrappy config show` prints the effective configuration. Secrets appear as
 `<set>` / `<unset>` and are never written to logs or the audit database.
@@ -186,28 +188,58 @@ scrappy approvals           Approval requests waiting for a human
 scrappy approve ID          Resolve one (--deny to refuse)
 scrappy tools               Registered tools and their risk classifications
 scrappy config show         Effective configuration, secrets redacted
-scrappy serve               Run the local API on 127.0.0.1:8787
+scrappy serve               Run the local API on 127.0.0.1:8787 (needs SCRAPPY_API_TOKEN)
 ```
 
 ## API
 
-Local-only by default, and **unauthenticated** - see
-[deploy/README.md](deploy/README.md) before exposing it.
+Local-only by default, and **authenticated** since v0.2. Every endpoint except
+`GET /health` needs a bearer token and a scope.
 
 ```
-GET  /health                  Liveness and component health
-GET  /status                  Full runtime state
-POST /tasks                   Submit an objective (202 Accepted)
-GET  /tasks/{id}              Result or progress
-GET  /tasks/{id}/events       Server-sent event stream
-GET  /approvals               Pending approval requests
-POST /approvals/{id}          Approve or deny exactly one operation
-GET  /audit                   Audit events, optionally filtered by task
+Endpoint                      Scope required
+------------------------------------------------------------------
+GET  /health                  none - liveness only (detail: system:read)
+GET  /status                  system:read
+POST /tasks                   task:create
+GET  /tasks/{id}              task:read
+GET  /tasks/{id}/events       task:read
+GET  /approvals               approval:read
+POST /approvals/{id}          approval:grant
+GET  /audit                   audit:read
 ```
+
+Set a token and use it:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"   # generate
+export SCRAPPY_API_TOKEN=<paste>                                # or put it in .env
+scrappy serve
+
+curl -H "Authorization: Bearer $SCRAPPY_API_TOKEN" \
+     -d '{"objective":"check disk usage"}' \
+     -H 'Content-Type: application/json' \
+     http://127.0.0.1:8787/tasks
+```
+
+**Leaving `SCRAPPY_API_TOKEN` unset does not disable authentication.** It means
+no credential is valid, so everything except `/health` returns 401. An
+unconfigured deployment fails closed.
+
+401 means the caller is unidentified; 403 means it is identified and lacks the
+scope. Identity comes from the credential only - `POST /tasks` no longer accepts
+an `actor` field, and `POST /approvals/{id}` no longer accepts `decided_by`.
+Both are rejected with 422 if sent, because a client that thinks it is naming
+itself is worse than one that gets an error.
 
 The API has no interactive approver by design. A task needing approval parks
 until a human resolves it through `POST /approvals/{id}` or `scrappy approve`.
-The HTTP layer cannot approve on its own.
+The HTTP layer cannot approve on its own - what v0.2 adds is that the human who
+resolved it is now identified from their credential rather than self-declared.
+
+**The CLI does not use the API** and needs no token. It drives the runtime
+in-process, trusted by file permissions rather than by a credential it could
+read off disk itself. See [docs/SECURITY.md](docs/SECURITY.md).
 
 ---
 

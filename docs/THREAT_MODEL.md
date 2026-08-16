@@ -1,6 +1,6 @@
 # Threat model
 
-Ten threats, what each one would actually look like against Scrappy OS, what
+Twelve threats, what each one would actually look like against Scrappy OS, what
 stops it today, and what does not.
 
 The honest framing: an LLM with tools is a *confused deputy* by construction. It
@@ -231,7 +231,102 @@ re-opens most of this - it is off by default and named for what it does.
 
 ---
 
-## Threats explicitly out of scope for v0.1
+## 11. Unauthenticated access to the control plane
+
+**Attack.** Anything that can reach the API port submits a task. In v0.1 that
+was the whole story: the only control was the loopback bind, which answers "can
+you reach me" and never "who are you". Concretely, on a host running v0.1:
+
+- another service on the box, or a compromised dependency inside any process on
+  it, POSTs to `127.0.0.1:8787/tasks` and gets a privileged agent
+- a user with an unprivileged shell account does the same
+- a browser on the host follows a link to `http://127.0.0.1:8787/tasks`; a
+  same-site-lax POST from a hostile page is enough
+- any misconfiguration that binds `0.0.0.0` - a container port map, a
+  reverse-proxy rule, `--host` typed once - exposes it to the network
+- and because the client named itself in the `actor` field, the audit trail
+  recorded the attacker's chosen label
+
+**Controls (v0.2).**
+
+- Bearer authentication on every endpoint except `GET /health`, verified in one
+  module that endpoints cannot bypass.
+- **Fail-closed when unconfigured.** No token means no valid credential; the API
+  refuses every authenticated request rather than falling open. Absent
+  configuration never means absent enforcement.
+- Constant-time comparison over SHA-256 digests, no early exit, so neither
+  timing nor a shared prefix leaks.
+- Scope required per endpoint; unknown scopes deny. `task:create` does not imply
+  `task:read`, and nothing cascades.
+- Identity comes from the credential only. `actor` and `decided_by` were removed
+  from request bodies and are rejected with 422 if sent.
+- Authorization is evaluated before resource lookup, so 404 vs 403 cannot be
+  used to enumerate task ids.
+- `doctor` FAILs on a non-loopback bind with no credential configured.
+- Loopback remains the default bind. Authentication is a second control, not a
+  replacement for the first.
+
+**Residual risk.** Substantial, and worth reading twice:
+
+- **The token is replayable.** Anyone who observes a request can repeat it.
+  There is no nonce, timestamp or per-request signature.
+- **Plaintext HTTP by default.** Scrappy OS does not terminate TLS. On loopback
+  that is defensible; on any other interface an observer on the path reads the
+  credential out of the first request.
+- **No expiry, no revocation list.** A stolen token works until an operator
+  changes the configuration and restarts.
+- **No rate limiting.** Guessing is unthrottled by Scrappy OS; entropy in the
+  token is what makes guessing impractical, so a short token is a real weakness
+  (`doctor` warns below 16 characters).
+- **CSRF is mitigated only incidentally.** Requiring an `Authorization` header
+  means a simple form POST cannot authenticate, and no cookie is ever issued -
+  but a page that can read the token from a compromised client can still use it.
+- **A token in `.env` is readable by anyone who can read `.env`.** File
+  permissions are the control there, and the CLI does not pretend otherwise.
+
+**Planned.** mTLS for service and node identity, short-lived scoped capability
+tokens, and multiple credentials with overlap-based rotation. The
+`Authenticator` protocol and the `TokenCredential` list exist so these arrive as
+siblings rather than as a rewrite of the token checker.
+
+---
+
+## 12. Identity spoofing and audit forgery
+
+**Attack.** The attacker does not try to bypass a control - they try to make the
+record wrong, so the response goes to the wrong place. Two shapes:
+
+1. Claim to be someone else, so a privileged action is attributed to a
+   colleague. In v0.1: `POST /tasks {"actor": "root"}`.
+2. Launder an approval. Approve a destructive operation while recording
+   `"decided_by": "the-cto"`, so the review afterwards finds a plausible name
+   attached to a decision that person never made.
+
+**Controls.**
+
+- Both fields are gone from the API surface. Identity is taken from the verified
+  credential and only from there.
+- `extra="forbid"` makes a v0.1 client sending them fail loudly with 422 rather
+  than have its claim silently ignored - a client that believes it is setting
+  the actor is a worse outcome than one that gets an error.
+- `Objective.identity` and `ApprovalDecision.identity` overwrite the legacy
+  label, so the typed identity and the displayed string cannot disagree.
+- `Actor` is frozen; a component cannot escalate by assignment, and
+  `with_scopes` intersects, so delegation can only ever attenuate.
+- An `Actor` with `auth_method=none` holding scopes fails construction, making
+  the forged-privileged-actor state unrepresentable rather than merely absent.
+- Agents get an actor with no scopes and an `on_behalf_of` reference. An agent
+  is never a principal.
+
+**Residual risk.** The audit log is still an unsigned SQLite file: anyone who
+can write to it can rewrite history, and identity columns are no exception.
+Ship rows off-host if that matters. And with a single configured token, every
+API caller *is* the same principal - v0.2 makes identity truthful, not granular.
+Attribution to a named human requires per-human credentials.
+
+---
+
+## Threats explicitly out of scope for v0.2
 
 - **Physical access.** Disk encryption and boot integrity are the platform's job.
 - **Kernel and hypervisor vulnerabilities.** Scrappy OS runs as an ordinary process.
@@ -256,3 +351,13 @@ make security-test        # or: pytest tests/security -v
 - `test_secret_redaction.py` - keys, value shapes, logs, audit, settings
 - `test_policy_enforcement.py` - fail-closed policy, approval single-use,
   destructive confirmation
+- `test_api_authentication.py` - missing, wrong and malformed credentials, the
+  fail-closed unconfigured case, and that no endpoint is anonymously reachable
+- `test_api_authorization.py` - insufficient scope, unknown scope, and that
+  authorization precedes resource lookup
+- `test_identity_propagation.py` - one actor followed from request to audit row
+- `test_audit_identity.py` - the security event taxonomy, and that no credential
+  or header reaches a durable record
+- `test_config_secrets.py` - secrets load, are not silently ignored, and do not
+  leak through repr, logs, exceptions or `config show`
+- `test_doctor_exposure.py` - the bind-address and credential truth table
