@@ -218,9 +218,15 @@ Four risk levels, and what happens at each:
 | Level | Examples | Default policy |
 |---|---|---|
 | **READ** | read a file, disk usage, process list, `git status` | allow |
-| **WRITE** | create or modify files inside the workspace | allow in workspace; approval outside |
+| **WRITE** | create or modify files inside the workspace | allow in workspace |
 | **PRIVILEGED** | `systemctl restart`, package install, network config | **approval required** |
 | **DESTRUCTIVE** | deletion outside the workspace, `mkfs`, shutdown, `rm -rf` | **approval + typed confirmation** |
+
+A tool's risk is a *range*, not a constant: `fs.delete` is a WRITE for a scratch
+file in the workspace and DESTRUCTIVE for anything outside it; `shell.run` is
+READ for `ls -la /etc` and DESTRUCTIVE for `rm -rf /`. The arguments decide, and
+the worse of the tool's declared ceiling and its argument-aware classification
+wins.
 
 Anything unrecognised is denied. An unknown tool name, an unmatched risk level,
 an argument the schema does not permit - all fail closed.

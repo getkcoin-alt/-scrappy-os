@@ -223,7 +223,8 @@ class FSMkdirTool(Tool):
     name = "fs.mkdir"
     description = "Create a directory, with parents, inside the workspace."
     input_model = PathArgs
-    risk = RiskLevel.WRITE
+    risk = RiskLevel.PRIVILEGED  # outside the workspace
+    min_risk = RiskLevel.WRITE  # inside it
     required_permissions = ("fs:write",)
     rollback = RollbackSpec(
         supported=True,
@@ -256,7 +257,8 @@ class FSWriteTool(Tool):
     name = "fs.write"
     description = "Write UTF-8 text to a file inside the workspace."
     input_model = WriteArgs
-    risk = RiskLevel.WRITE
+    risk = RiskLevel.PRIVILEGED  # outside the workspace
+    min_risk = RiskLevel.WRITE  # inside it
     required_permissions = ("fs:write",)
     rollback = RollbackSpec(
         supported=True,
@@ -311,7 +313,10 @@ class FSMoveTool(Tool):
     name = "fs.move"
     description = "Move or rename a file or directory within the workspace."
     input_model = MoveArgs
-    risk = RiskLevel.WRITE
+    # A move is a delete plus a write; outside the workspace the delete half is
+    # destructive, so the ceiling has to say so.
+    risk = RiskLevel.DESTRUCTIVE
+    min_risk = RiskLevel.WRITE
     required_permissions = ("fs:write",)
     rollback = RollbackSpec(supported=True, description="Move it back.", inverse_tool="fs.move")
 
@@ -362,7 +367,8 @@ class FSDeleteTool(Tool):
     name = "fs.delete"
     description = "Delete a file or directory. Destructive outside the workspace."
     input_model = DeleteArgs
-    risk = RiskLevel.DESTRUCTIVE
+    risk = RiskLevel.DESTRUCTIVE  # outside the workspace
+    min_risk = RiskLevel.WRITE  # scratch files inside it
     required_permissions = ("fs:write", "fs:delete")
     rollback = RollbackSpec(
         supported=False,

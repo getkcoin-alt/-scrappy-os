@@ -184,9 +184,12 @@ class PolicyEngine:
                 requires_confirmation_phrase=True,
             )
 
-        # Unreachable today. Kept because the failure mode of a new RiskLevel
-        # arriving without a rule must be "deny", never "fall through to allow".
-        return PolicyVerdict(
+        # Unreachable today: the branches above are exhaustive over RiskLevel,
+        # which is why mypy flags this line. It stays because the failure mode of
+        # a new RiskLevel arriving without a rule must be "deny", never "fall
+        # through to allow" - and the compiler cannot enforce that for a future
+        # edit, only this line can.
+        return PolicyVerdict(  # type: ignore[unreachable]
             PolicyDecision.DENY,
             risk,
             rule="default-deny",

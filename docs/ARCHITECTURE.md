@@ -164,13 +164,19 @@ may also implement `classify(args, ctx)` for what *these* arguments do:
 
 ```python
 class FSDeleteTool(Tool):
-    risk = RiskLevel.DESTRUCTIVE          # ceiling
+    risk = RiskLevel.DESTRUCTIVE          # ceiling: the worst it can do
+    min_risk = RiskLevel.WRITE            # floor: the least it can do
 
     def classify(self, args, ctx):        # argument-aware
         return classify_path_delete(args.path, workspace=ctx.workspace)
         # inside the workspace  -> WRITE
         # anywhere else         -> DESTRUCTIVE
 ```
+
+The floor is not decoration. It decides which tools a planner is *shown* at a
+given risk ceiling. Filtering on the ceiling instead would hide `fs.delete`
+from a WRITE-ceiling task that is entitled to delete its own scratch files, and
+would hide `shell.run` from a read-only task that only wants `ls -la /etc`.
 
 Deleting a scratch file in the workspace is routine; deleting `/var/lib/mysql`
 is not. Without this distinction, either routine cleanup trains operators to

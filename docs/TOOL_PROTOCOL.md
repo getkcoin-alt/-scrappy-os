@@ -14,7 +14,8 @@ class Tool(ABC):
     name: ClassVar[str]                          # dotted, stable
     description: ClassVar[str]                   # one line, for the planner
     input_model: ClassVar[type[BaseModel]]       # typed, extra="forbid"
-    risk: ClassVar[RiskLevel]                    # ceiling, not expectation
+    risk: ClassVar[RiskLevel]                    # ceiling: the worst it can do
+    min_risk: ClassVar[RiskLevel | None]         # floor: the least it can do
     required_permissions: ClassVar[tuple[str, ...]]
     rollback: ClassVar[RollbackSpec | None]
 
@@ -80,11 +81,29 @@ names outright rather than searching for something close.
 
 ## The eight rules
 
-### 1. Declare the honest ceiling
+### 1. Declare an honest ceiling *and* floor
 
 `risk` is the worst thing the tool can do with **any** arguments, not the
 typical case. `fs.delete` is DESTRUCTIVE even though most deletions are
 harmless, because one of them will not be.
+
+`min_risk` is the *least* dangerous classification the tool can produce. It
+defaults to `risk`, which is correct for tools whose risk is fixed. Set it only
+when `classify` can return something lower:
+
+| Tool | `risk` (ceiling) | `min_risk` (floor) | Why |
+|---|---|---|---|
+| `system.disk` | READ | *(= READ)* | Risk does not vary |
+| `shell.run` | DESTRUCTIVE | READ | `ls -la /etc` is a read |
+| `fs.write` | PRIVILEGED | WRITE | WRITE in the workspace, PRIVILEGED outside |
+| `fs.delete` | DESTRUCTIVE | WRITE | Scratch files inside; someone else's data outside |
+| `process.kill` | DESTRUCTIVE | PRIVILEGED | SIGKILL, or a process the machine needs |
+
+The two are used for different things. The **ceiling** is a correctness check:
+`classify` returning more than it is a bug, and the executor logs it. The
+**floor** decides whether a planner is shown the tool at a given risk ceiling -
+filtering on the ceiling would hide `fs.delete` from a WRITE-ceiling task that
+is perfectly entitled to delete its own scratch file.
 
 ### 2. Classify arguments when danger depends on them
 

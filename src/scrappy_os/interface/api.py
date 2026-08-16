@@ -35,6 +35,9 @@ from scrappy_os.security.approvals import ApprovalNotFound
 
 logger = get_logger("api")
 
+#: Seconds between SSE keepalive comments on an idle stream.
+KEEPALIVE_SECONDS = 15.0
+
 #: Tasks the API has run, kept in memory for GET /tasks/{id}.
 #: Bounded so a long-lived daemon cannot grow without limit; the durable record
 #: is the audit log, which this is only a convenience view over.
@@ -234,14 +237,17 @@ def _build_router() -> APIRouter:
                     if await request.is_disconnected():
                         return
                     try:
-                        event = await asyncio.wait_for(subscription.get(), timeout=15.0)
+                        # A keepalive every 15s so proxies do not drop an idle
+                        # stream while a long tool call is running.
+                        async with asyncio.timeout(KEEPALIVE_SECONDS):
+                            live = await subscription.get()
                     except TimeoutError:
                         yield ": keepalive\n\n"
                         continue
-                    if event is None:
+                    if live is None:
                         return
-                    yield _sse(event.model_dump(mode="json"))
-                    if event.type in terminal:
+                    yield _sse(live.model_dump(mode="json"))
+                    if live.type in terminal:
                         return
             finally:
                 subscription.close()
@@ -318,4 +324,4 @@ def _sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, default=str)}\n\n"
 
 
-__all__ = ["MAX_TRACKED_TASKS", "ApprovalBody", "TaskRequest", "create_app"]
+__all__ = ["KEEPALIVE_SECONDS", "MAX_TRACKED_TASKS", "ApprovalBody", "TaskRequest", "create_app"]

@@ -85,8 +85,11 @@ class ShellRunTool(Tool):
         "Prefer a typed tool; this is the escape hatch."
     )
     input_model = ShellArgs
-    #: Ceiling, not expectation. `classify` decides what these arguments are.
+    #: Ceiling, not expectation. `classify` decides what these arguments are:
+    #: `ls -la /etc` is READ, `systemctl restart` is PRIVILEGED, `rm -rf` is
+    #: DESTRUCTIVE and also denylisted.
     risk = RiskLevel.DESTRUCTIVE
+    min_risk = RiskLevel.READ
     required_permissions = ("shell:execute",)
     rollback = RollbackSpec(
         supported=False,

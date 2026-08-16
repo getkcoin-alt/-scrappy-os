@@ -77,7 +77,18 @@ class Tool(ABC):
     #: Typed arguments. Extra fields are rejected.
     input_model: ClassVar[type[BaseModel]] = EmptyArgs
     #: The worst this tool can do with any arguments. A ceiling, not a guess.
+    #: `classify` may return anything up to this; returning more is a bug in
+    #: the tool and the executor logs it.
     risk: ClassVar[RiskLevel] = RiskLevel.READ
+    #: The *least* dangerous classification this tool can produce.
+    #:
+    #: Ceiling and floor differ for argument-sensitive tools: `fs.delete` can
+    #: reach DESTRUCTIVE, but deleting a scratch file in the workspace is a
+    #: WRITE. The floor is what decides whether a planner is shown the tool at
+    #: a given risk ceiling - filtering on the ceiling would hide `fs.delete`
+    #: from a WRITE-ceiling task that is entitled to use it. Defaults to the
+    #: ceiling, which is correct for tools whose risk is fixed.
+    min_risk: ClassVar[RiskLevel | None] = None
     #: Capability labels, for future role-based grants.
     required_permissions: ClassVar[tuple[str, ...]] = ()
     #: Undo metadata for Mahesh.
@@ -131,12 +142,18 @@ class Tool(ABC):
         distinguishes the two and the audit log records which happened.
         """
 
+    @property
+    def risk_floor(self) -> RiskLevel:
+        """The least dangerous classification this tool can produce."""
+        return self.min_risk if self.min_risk is not None else self.risk
+
     def json_schema(self) -> dict[str, Any]:
         """Machine-readable description handed to the planning agent."""
         return {
             "name": self.name,
             "description": self.description,
             "risk": str(self.risk),
+            "min_risk": str(self.risk_floor),
             "parameters": self.input_model.model_json_schema(),
         }
 
@@ -195,12 +212,14 @@ class ToolRegistry:
         return [tool for tool in self.all() if tool.name not in self._disabled]
 
     def by_max_risk(self, ceiling: RiskLevel) -> list[Tool]:
-        """Tools whose static risk is at or below ``ceiling``.
+        """Tools that could legitimately run at or below ``ceiling``.
 
-        Used to build the planning prompt: an agent working under a READ
-        ceiling is not shown tools it could never be permitted to run.
+        Filters on each tool's *floor*, not its ceiling: `fs.delete` reaches
+        DESTRUCTIVE but is a WRITE inside the workspace, so a WRITE-ceiling task
+        is entitled to use it and should be shown it. Tools whose floor is above
+        the ceiling could never be permitted, so they are hidden.
         """
-        return [tool for tool in self.enabled() if tool.risk.rank <= ceiling.rank]
+        return [tool for tool in self.enabled() if tool.risk_floor.rank <= ceiling.rank]
 
     def catalogue(self, *, ceiling: RiskLevel | None = None) -> str:
         """The tool list as it appears in a planning prompt."""
@@ -216,7 +235,9 @@ class ToolRegistry:
                 f"{key}{'' if key in required else '?'}:{value.get('type', 'any')}"
                 for key, value in properties.items()
             )
-            lines.append(f"- {tool.name}({params}) [{tool.risk}] {tool.description}")
+            floor, ceiling_risk = tool.risk_floor, tool.risk
+            band = str(floor) if floor is ceiling_risk else f"{floor}..{ceiling_risk}"
+            lines.append(f"- {tool.name}({params}) [{band}] {tool.description}")
         return "\n".join(lines)
 
     def schemas(self) -> list[dict[str, Any]]:

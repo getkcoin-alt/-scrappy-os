@@ -84,23 +84,42 @@ def test_argument_validation_rejects_missing_fields() -> None:
         _EchoTool().parse_arguments({})
 
 
-def test_catalogue_respects_the_risk_ceiling() -> None:
-    """An agent under a READ ceiling is not shown tools it could never run."""
+def test_catalogue_hides_tools_that_could_never_run_at_the_ceiling() -> None:
+    """A READ-ceiling agent is not shown a tool whose floor is above READ."""
     registry = build_default_registry()
     read_only = registry.catalogue(ceiling=RiskLevel.READ)
 
     assert "system.disk" in read_only
+    assert "fs.write" not in read_only, "fs.write cannot be less than WRITE"
     assert "fs.delete" not in read_only
-    assert "shell.run" not in read_only
+    assert "process.kill" not in read_only
 
-    everything = registry.catalogue(ceiling=RiskLevel.DESTRUCTIVE)
-    assert "fs.delete" in everything
+    # shell.run *can* be READ (`ls -la /etc`), so hiding it would deny a
+    # read-only task a capability it is entitled to use.
+    assert "shell.run" in read_only
 
 
-def test_by_max_risk_filters_on_the_static_ceiling() -> None:
+def test_catalogue_shows_a_tool_whose_floor_is_within_the_ceiling() -> None:
+    """fs.delete reaches DESTRUCTIVE, but is a WRITE inside the workspace."""
+    registry = build_default_registry()
+    write_level = registry.catalogue(ceiling=RiskLevel.WRITE)
+    assert "fs.delete" in write_level
+    assert "fs.write" in write_level
+    assert "process.kill" not in write_level, "process.kill is PRIVILEGED at best"
+
+
+def test_catalogue_renders_the_risk_band_for_variable_tools() -> None:
+    """A planner should see that a tool's risk depends on its arguments."""
+    catalogue = build_default_registry().catalogue(ceiling=RiskLevel.DESTRUCTIVE)
+    assert "[read..destructive]" in catalogue  # shell.run
+    assert "[write..destructive]" in catalogue  # fs.delete
+    assert "[read]" in catalogue  # system.disk, fixed
+
+
+def test_by_max_risk_filters_on_the_floor_not_the_ceiling() -> None:
     registry = build_default_registry()
     for tool in registry.by_max_risk(RiskLevel.READ):
-        assert tool.risk is RiskLevel.READ
+        assert tool.risk_floor is RiskLevel.READ
 
 
 def test_default_registry_registers_every_tool_family() -> None:
@@ -142,9 +161,10 @@ def test_json_schemas_are_generated_for_planning() -> None:
         ("system.disk", RiskLevel.READ),
         ("fs.read", RiskLevel.READ),
         ("git.status", RiskLevel.READ),
-        ("fs.write", RiskLevel.WRITE),
-        ("fs.mkdir", RiskLevel.WRITE),
-        ("process.kill", RiskLevel.PRIVILEGED),
+        ("fs.write", RiskLevel.PRIVILEGED),
+        ("fs.mkdir", RiskLevel.PRIVILEGED),
+        ("fs.move", RiskLevel.DESTRUCTIVE),
+        ("process.kill", RiskLevel.DESTRUCTIVE),
         ("fs.delete", RiskLevel.DESTRUCTIVE),
         ("shell.run", RiskLevel.DESTRUCTIVE),
     ],
@@ -153,6 +173,28 @@ def test_static_risk_ceilings_are_declared_as_documented(
     tool_name: str, expected: RiskLevel
 ) -> None:
     assert build_default_registry().get(tool_name).risk is expected
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "expected"),
+    [
+        ("system.disk", RiskLevel.READ),
+        ("shell.run", RiskLevel.READ),
+        ("fs.write", RiskLevel.WRITE),
+        ("fs.delete", RiskLevel.WRITE),
+        ("process.kill", RiskLevel.PRIVILEGED),
+    ],
+)
+def test_risk_floors_are_declared_as_documented(
+    tool_name: str, expected: RiskLevel
+) -> None:
+    assert build_default_registry().get(tool_name).risk_floor is expected
+
+
+def test_no_tool_declares_a_floor_above_its_ceiling() -> None:
+    """A floor above the ceiling would make the tool unreachable and the audit lie."""
+    for tool in build_default_registry().all():
+        assert tool.risk_floor.rank <= tool.risk.rank, tool.name
 
 
 def test_every_tool_declares_a_description_and_permissions() -> None:

@@ -187,7 +187,8 @@ class ProcessKillTool(Tool):
     name = "process.kill"
     description = "Send a termination signal to a process. Requires approval."
     input_model = ProcessKillArgs
-    risk = RiskLevel.PRIVILEGED
+    risk = RiskLevel.DESTRUCTIVE  # SIGKILL, or a process the machine needs
+    min_risk = RiskLevel.PRIVILEGED
     required_permissions = ("process:signal",)
     rollback = RollbackSpec(
         supported=False,
