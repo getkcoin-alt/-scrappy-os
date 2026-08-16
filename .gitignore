@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Scrappy OS local state - never commit runtime data or credentials
+.env
+.env.*
+!.env.example
+config/scrappy.yaml
+config/*.local.yaml
+data/
+var/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+workspace/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
