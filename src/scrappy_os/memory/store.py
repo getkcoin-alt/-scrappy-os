@@ -25,7 +25,20 @@ from scrappy_os.observability.logging import get_logger
 
 logger = get_logger("store")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+#: Columns added after v1, applied to databases that predate them.
+#: Additive only: this mechanism can introduce a nullable column and nothing
+#: else. Anything that rewrites or drops data belongs in a real migration with a
+#: backup step, not in a startup path that runs unattended.
+ADDITIVE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("audit_events", "actor_id", "TEXT"),
+    ("audit_events", "actor_type", "TEXT"),
+    ("audit_events", "auth_method", "TEXT"),
+    ("tool_calls", "actor_id", "TEXT"),
+    ("tool_calls", "actor_type", "TEXT"),
+    ("approvals", "decided_by_actor_id", "TEXT"),
+)
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -143,6 +156,25 @@ class StoreError(ScrappyError):
     """The durable store could not be read or written."""
 
 
+async def _apply_additive_columns(conn: aiosqlite.Connection) -> None:
+    """Add any :data:`ADDITIVE_COLUMNS` a pre-existing database is missing.
+
+    ``CREATE TABLE IF NOT EXISTS`` does nothing for a table that already exists,
+    so a v0.1 database upgraded in place would silently lack the identity
+    columns and every actor would read as NULL. Existing rows keep that NULL,
+    which is the truth: those actions predate identity being recorded.
+    """
+    for table, column, column_type in ADDITIVE_COLUMNS:
+        cursor = await conn.execute(f"PRAGMA table_info({table})")
+        existing = {str(row[1]) for row in await cursor.fetchall()}
+        await cursor.close()
+        if column in existing:
+            continue
+        # Table and column names are module constants, never user input.
+        await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+        logger.info("schema_column_added", table=table, column=column)
+
+
 class Store:
     """Async SQLite access. One instance per process, shared by every subsystem.
 
@@ -175,6 +207,7 @@ class Store:
             await conn.execute("PRAGMA foreign_keys=ON")
             for statement in SCHEMA_STATEMENTS:
                 await conn.execute(statement)
+            await _apply_additive_columns(conn)
             await conn.execute(
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('version', ?)",
                 (str(SCHEMA_VERSION),),

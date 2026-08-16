@@ -120,6 +120,9 @@ class Orchestrator:
                 actor=objective.actor,
                 max_risk=str(objective.max_risk),
                 dry_run=objective.dry_run,
+                # The principal that submitted this objective, carried onto every
+                # event of the run so the audit trail can be filtered by who.
+                **(objective.identity.audit_fields() if objective.identity else {}),
             )
             logger.info(
                 "task_created",
@@ -288,6 +291,9 @@ class Orchestrator:
             tool_name=step.tool_name,
             arguments=step.arguments,
             actor=f"agent:{self.brahma.role}",
+            # The agent proposed this step; the principal below is accountable
+            # for it. Both are recorded - see scrappy_os.core.identity.
+            identity=task.objective.identity,
             risk_level=step.expected_risk,
         )
         execution = await self._executor.execute(

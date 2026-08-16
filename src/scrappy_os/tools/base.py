@@ -23,6 +23,7 @@ from pydantic import BaseModel, ValidationError
 from scrappy_os.core.config import ScrappySettings
 from scrappy_os.core.enums import RiskLevel
 from scrappy_os.core.errors import ToolNotFound, ValidationFailed
+from scrappy_os.core.identity import Actor
 
 
 @dataclass(slots=True)
@@ -36,6 +37,14 @@ class ToolContext:
     settings: ScrappySettings
     task_id: str
     actor: str = "scrappy"
+    identity: Actor | None = None
+    """The authenticated principal this call is being made for, if any.
+
+    Present so a tool can *record* who it acted for. A tool must not consult it
+    to decide whether it is allowed to act: that decision was already made by
+    the policy engine before the tool was reached, and re-deciding it here would
+    create a second, weaker gate.
+    """
     call_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 

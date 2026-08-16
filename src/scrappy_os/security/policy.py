@@ -30,6 +30,7 @@ from typing import Any
 
 from scrappy_os.core.config import ScrappySettings
 from scrappy_os.core.enums import PolicyDecision, RiskLevel
+from scrappy_os.core.identity import Actor
 from scrappy_os.core.models import ToolCall
 
 
@@ -77,6 +78,17 @@ class PolicyContext:
     disabled_tools: frozenset[str] = field(default_factory=frozenset)
     paths: Sequence[Path] = ()
     """Resolved paths the operation touches, for workspace containment checks."""
+
+    actor: Actor | None = None
+    """The principal this operation is running for.
+
+    Recorded on every decision so a denial can be attributed. No rule below
+    consults it yet: v0.2 authorizes at the API boundary by scope, and risk
+    rules apply equally to everyone once a task exists. This is the seam
+    per-actor policy (RBAC, per-principal ceilings) will use, and having the
+    engine already receive the actor is what keeps that from becoming a
+    signature change across every call site.
+    """
 
 
 class PolicyEngine:

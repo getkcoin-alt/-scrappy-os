@@ -24,6 +24,7 @@ from scrappy_os.core.enums import (
     TaskState,
 )
 from scrappy_os.core.errors import InvalidStateTransition
+from scrappy_os.core.identity import Actor
 
 
 def new_id() -> str:
@@ -56,7 +57,14 @@ class Objective(ScrappyModel):
 
     id: str = Field(default_factory=new_id)
     text: str = Field(min_length=1, max_length=8000)
-    actor: str = Field(default="cli", description="Who asked. Never a model.")
+    actor: str = Field(default="cli", description="Who asked, as a label. Never a model.")
+    identity: Actor | None = Field(
+        default=None,
+        description=(
+            "The authenticated principal behind this objective. Set by the interface that "
+            "verified a credential; never accepted from a request body."
+        ),
+    )
     created_at: datetime = Field(default_factory=utc_now)
     max_risk: RiskLevel = Field(
         default=RiskLevel.READ,
@@ -74,6 +82,17 @@ class Objective(ScrappyModel):
         if not stripped:
             raise ValueError("objective text cannot be blank")
         return stripped
+
+    @model_validator(mode="after")
+    def _label_follows_identity(self) -> Self:
+        """Keep the ``actor`` label honest when a real identity is attached.
+
+        The two fields disagreeing is how a misleading audit trail starts, so
+        the verified identity wins and the label becomes a rendering of it.
+        """
+        if self.identity is not None:
+            self.actor = self.identity.label
+        return self
 
 
 TASK_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
@@ -227,7 +246,17 @@ class ToolCall(ScrappyModel):
     step_id: str | None = None
     tool_name: str = Field(min_length=1, max_length=64)
     arguments: dict[str, Any] = Field(default_factory=dict)
-    actor: str = Field(default="scrappy", description="Agent or human that requested this.")
+    actor: str = Field(
+        default="scrappy",
+        description="Proximate requester - usually the agent that proposed this step.",
+    )
+    identity: Actor | None = Field(
+        default=None,
+        description=(
+            "The authenticated principal whose task this call belongs to. An agent proposes; "
+            "a principal is accountable. Carried from the objective, never from tool arguments."
+        ),
+    )
     requested_at: datetime = Field(default_factory=utc_now)
     risk_level: RiskLevel = RiskLevel.READ
     approval_state: ApprovalState | None = None
@@ -345,10 +374,24 @@ class ApprovalDecision(ScrappyModel):
 
     request_id: str
     approved: bool
-    decided_by: str = Field(default="operator")
+    decided_by: str = Field(default="operator", description="Who answered, as a label.")
+    identity: Actor | None = Field(
+        default=None,
+        description=(
+            "The authenticated principal that granted or refused. Over the API this comes "
+            "from the verified credential, never from the request body - a caller that could "
+            "name its own approver could launder an approval through someone else's name."
+        ),
+    )
     decided_at: datetime = Field(default_factory=utc_now)
     note: str | None = None
     confirmation_phrase: str | None = None
+
+    @model_validator(mode="after")
+    def _label_follows_identity(self) -> Self:
+        if self.identity is not None:
+            self.decided_by = self.identity.label
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +411,13 @@ class AuditEvent(ScrappyModel):
     event_type: EventType
     task_id: str | None = None
     actor: str = "scrappy"
+    actor_id: str | None = Field(
+        default=None, description="Authenticated principal id, when the action had one."
+    )
+    actor_type: str | None = Field(default=None, description="human | service | node | system.")
+    auth_method: str | None = Field(
+        default=None, description="How that principal was authenticated."
+    )
     component: str = "runtime"
     tool_name: str | None = None
     risk: RiskLevel | None = None

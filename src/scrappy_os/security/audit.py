@@ -53,6 +53,9 @@ class AuditLog:
                 task_id=event.task_id,
                 component=event.component,
                 actor=str(event.payload.get("actor", "scrappy")),
+                actor_id=_optional_str(event.payload.get("actor_id")),
+                actor_type=_optional_str(event.payload.get("actor_type")),
+                auth_method=_optional_str(event.payload.get("auth_method")),
                 tool_name=_optional_str(event.payload.get("tool_name")),
                 risk=_optional_risk(event.payload.get("risk")),
                 decision=_optional_decision(event.payload.get("decision")),
@@ -80,9 +83,9 @@ class AuditLog:
         await self._store.execute(
             """
             INSERT INTO audit_events (
-                id, timestamp, event_type, task_id, actor, component,
-                tool_name, risk, decision, success, duration_ms, payload, payload_sha256
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                id, timestamp, event_type, task_id, actor, actor_id, actor_type, auth_method,
+                component, tool_name, risk, decision, success, duration_ms, payload, payload_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.id,
@@ -90,6 +93,9 @@ class AuditLog:
                 str(event.event_type),
                 event.task_id,
                 event.actor,
+                event.actor_id,
+                event.actor_type,
+                event.auth_method,
                 event.component,
                 event.tool_name,
                 str(event.risk) if event.risk else None,
@@ -109,9 +115,9 @@ class AuditLog:
         await self._store.execute(
             """
             INSERT OR REPLACE INTO tool_calls (
-                id, task_id, step_id, tool_name, arguments, actor, requested_at,
-                risk_level, policy_decision, policy_rule, approval_id, approval_state
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                id, task_id, step_id, tool_name, arguments, actor, actor_id, actor_type,
+                requested_at, risk_level, policy_decision, policy_rule, approval_id, approval_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 call.id,
@@ -120,6 +126,8 @@ class AuditLog:
                 call.tool_name,
                 dumps(redact(call.arguments)),
                 call.actor,
+                call.identity.id if call.identity else None,
+                str(call.identity.actor_type) if call.identity else None,
                 call.requested_at.isoformat(),
                 str(call.risk_level),
                 str(call.policy_decision) if call.policy_decision else None,

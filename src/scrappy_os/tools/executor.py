@@ -116,6 +116,7 @@ class ToolExecutor:
             settings=self._settings,
             task_id=call.task_id,
             actor=call.actor,
+            identity=call.identity,
             call_id=call.id,
         )
 
@@ -179,6 +180,7 @@ class ToolExecutor:
                 known_tools=self._registry.names,
                 disabled_tools=self._registry.disabled,
                 paths=paths,
+                actor=call.identity,
             ),
             reason=reason,
         )
