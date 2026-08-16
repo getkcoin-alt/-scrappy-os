@@ -8,6 +8,27 @@ waits for a human. The API deliberately cannot do this - see
 Commands intentionally do not share a long-lived runtime. Each one starts what
 it needs, does its job and shuts down, so a crashed command cannot leave a
 half-open database behind.
+
+**The CLI drives the runtime in-process; it does not call the HTTP API.**
+
+That is a deliberate choice, and the alternative was considered. Routing the CLI
+through the authenticated API would look more uniform, but the uniformity would
+be theatre: the CLI runs as a user who can already read ``.env`` (where the token
+lives), open the SQLite audit trail directly, and restart the service. A
+credential check against a secret the caller can simply read off disk enforces
+nothing - it only makes the boundary *look* stronger than it is, which is worse
+than an honest one, because it is the kind of thing that ends up in a diagram.
+
+So the CLI's trust comes from the operating system, and it says so: every command
+runs as :func:`~scrappy_os.core.identity.local_cli_actor`, an actor whose
+``auth_method`` is ``local_process``. Audit rows from the CLI are therefore
+distinguishable from token-authenticated API rows at a glance, which is the
+property that actually matters for accountability.
+
+The real boundary is the host's file permissions on the data directory (0700)
+and the database (0600). If an untrusted user can run ``scrappy`` on this
+machine, they have already lost that fight, and no in-process token would have
+saved them. See ``docs/SECURITY.md``.
 """
 
 from __future__ import annotations
@@ -22,6 +43,7 @@ import typer
 from scrappy_os import __version__
 from scrappy_os.core.config import ScrappySettings, load_settings
 from scrappy_os.core.enums import RiskLevel
+from scrappy_os.core.identity import local_cli_actor
 from scrappy_os.core.models import ApprovalDecision, ApprovalRequest, Objective
 from scrappy_os.heart.runtime import Runtime
 from scrappy_os.interface.doctor import CheckStatus, run_doctor
@@ -212,7 +234,12 @@ def ask(
         runtime.set_approval_prompt(_make_prompt(objective, auto_yes=yes))
         try:
             outcome = await runtime.submit(
-                Objective(text=objective, actor="cli", max_risk=ceiling, dry_run=dry_run)
+                Objective(
+                    text=objective,
+                    identity=local_cli_actor(),
+                    max_risk=ceiling,
+                    dry_run=dry_run,
+                )
             )
             return {
                 "task_id": outcome.task.id,
@@ -260,7 +287,7 @@ def _make_prompt(objective: str, *, auto_yes: bool) -> Any:
                 return ApprovalDecision(
                     request_id=request.id,
                     approved=False,
-                    decided_by="cli",
+                    identity=local_cli_actor(),
                     note="destructive operations cannot be approved without a terminal",
                 )
             typed = typer.prompt(f"  Type '{request.confirmation_phrase}' to proceed", default="")
@@ -268,20 +295,25 @@ def _make_prompt(objective: str, *, auto_yes: bool) -> Any:
             return ApprovalDecision(
                 request_id=request.id,
                 approved=approved,
-                decided_by="cli",
+                identity=local_cli_actor(),
                 confirmation_phrase=typed.strip(),
                 note=None if approved else "confirmation phrase did not match",
             )
 
         if auto_yes:
             typer.echo(dim("  auto-approved by --yes"))
-            return ApprovalDecision(request_id=request.id, approved=True, decided_by="cli --yes")
+            return ApprovalDecision(
+                request_id=request.id,
+                approved=True,
+                identity=local_cli_actor(),
+                note="auto-approved by --yes",
+            )
 
         if not sys.stdin.isatty():
             return ApprovalDecision(
                 request_id=request.id,
                 approved=False,
-                decided_by="cli",
+                identity=local_cli_actor(),
                 note="no terminal available to ask for approval",
             )
 
@@ -289,7 +321,7 @@ def _make_prompt(objective: str, *, auto_yes: bool) -> Any:
         return ApprovalDecision(
             request_id=request.id,
             approved=approved,
-            decided_by="cli",
+            identity=local_cli_actor(),
             note=None if approved else "declined at the prompt",
         )
 
@@ -461,7 +493,7 @@ def approve(
             decision = ApprovalDecision(
                 request_id=request.id,
                 approved=not deny,
-                decided_by="cli",
+                identity=local_cli_actor(),
                 confirmation_phrase=phrase,
                 note="resolved via scrappy approve",
             )
@@ -536,11 +568,31 @@ def serve(
     bind_host = host or settings.api_host
     bind_port = port or settings.api_port
 
-    if bind_host not in {"127.0.0.1", "localhost", "::1"}:
+    is_local = bind_host in {"127.0.0.1", "localhost", "::1"}
+    if not settings.api_auth_configured:
         typer.echo(
             warn(
-                f"Binding {bind_host}:{bind_port}. The API has no authentication - "
-                "put it behind an authenticating proxy.",
+                "SCRAPPY_API_TOKEN is not set. The API will start and refuse every "
+                "authenticated request; only GET /health will answer.",
+                prefix=True,
+            )
+        )
+    if not is_local and not settings.api_auth_configured:
+        # Refusing to start would be the stricter choice, but an operator who
+        # passed --host explicitly has said what they want, and a daemon that
+        # silently declines to boot is its own kind of outage. Say it loudly and
+        # let the (useless, because unauthenticated) instance come up.
+        typer.echo(
+            error(
+                f"Binding {bind_host}:{bind_port} with no API token. This instance is "
+                "reachable off-host and cannot identify any caller. Run `scrappy doctor`."
+            )
+        )
+    elif not is_local:
+        typer.echo(
+            warn(
+                f"Binding {bind_host}:{bind_port}. Bearer tokens are replayable if "
+                "intercepted - terminate TLS in front of this.",
                 prefix=True,
             )
         )

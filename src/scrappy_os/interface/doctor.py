@@ -23,6 +23,7 @@ from scrappy_os import __version__
 from scrappy_os.core.config import ScrappySettings
 from scrappy_os.memory.store import Store
 from scrappy_os.models.registry import ModelRouter
+from scrappy_os.security.authn import MIN_TOKEN_LENGTH
 from scrappy_os.tools.base import ToolRegistry
 
 MINIMUM_PYTHON = (3, 12)
@@ -84,6 +85,7 @@ async def run_doctor(
         _check_workspace(settings),
         _check_read_roots(settings),
         _check_api_binding(settings),
+        _check_api_authentication(settings),
         _check_shell_config(settings),
         _check_optional_binaries(),
     ]
@@ -227,18 +229,85 @@ def _check_read_roots(settings: ScrappySettings) -> CheckResult:
 
 
 def _check_api_binding(settings: ScrappySettings) -> CheckResult:
+    """Bind address and credentials, judged together.
+
+    Neither fact is alarming alone. Loopback with no token is the default and is
+    fine. A token with an off-host bind is a deliberate, defensible deployment.
+    The combination of *reachable by strangers* and *cannot tell strangers
+    apart* is the one that has to stop being a warning and start being a
+    failure, because a warning in that state is something an operator scrolls
+    past.
+    """
+    if settings.api_exposure_is_unsafe:
+        return CheckResult(
+            "api binding",
+            CheckStatus.FAIL,
+            f"API binds {settings.api_host}:{settings.api_port} - reachable off this host - "
+            "and SCRAPPY_API_TOKEN is not set, so no caller can be identified",
+            "Set SCRAPPY_API_TOKEN, or bind loopback with SCRAPPY_API_HOST=127.0.0.1. "
+            "Until then every authenticated endpoint refuses, so this instance is "
+            "exposed and useless at the same time.",
+        )
+
     if settings.api_is_local_only:
+        credentials = "token set" if settings.api_auth_configured else "no token set"
         return CheckResult(
             "api binding",
             CheckStatus.PASS,
-            f"{settings.api_host}:{settings.api_port} (local only)",
+            f"{settings.api_host}:{settings.api_port} (local only, {credentials})",
         )
+
     return CheckResult(
         "api binding",
         CheckStatus.WARN,
-        f"API binds {settings.api_host}:{settings.api_port}, reachable off this host",
-        "The API has no authentication. Put it behind an authenticating proxy, "
-        "or set SCRAPPY_API_HOST=127.0.0.1.",
+        f"API binds {settings.api_host}:{settings.api_port}, reachable off this host; "
+        "bearer authentication is configured",
+        "A bearer token is a shared secret sent on every request: it is replayable if "
+        "intercepted and it does not authenticate the server to the client. Terminate TLS "
+        "in front of this, or bind loopback and reach it over SSH.",
+    )
+
+
+def _check_api_authentication(settings: ScrappySettings) -> CheckResult:
+    """Whether the API can identify anyone, and how well.
+
+    Reports the presence and shape of the credential. It never reports the
+    credential: the value is not read here, only its length and its existence.
+    """
+    if not settings.api_auth_configured:
+        detail = "no SCRAPPY_API_TOKEN set; every authenticated endpoint will refuse"
+        if settings.api_is_local_only:
+            return CheckResult(
+                "api authentication",
+                CheckStatus.WARN,
+                detail + " (the API is loopback-only, so nothing is exposed)",
+                "Set SCRAPPY_API_TOKEN to use the HTTP API. The CLI works without one - "
+                "it drives the runtime in-process.",
+            )
+        return CheckResult(
+            "api authentication",
+            CheckStatus.FAIL,
+            detail,
+            "Set SCRAPPY_API_TOKEN before binding a non-loopback address.",
+        )
+
+    token = settings.api_token
+    length = len(token.get_secret_value()) if token else 0
+    if length < MIN_TOKEN_LENGTH:
+        return CheckResult(
+            "api authentication",
+            CheckStatus.WARN,
+            f"SCRAPPY_API_TOKEN is only {length} characters",
+            f"Use at least {MIN_TOKEN_LENGTH}, ideally from `python -c "
+            '"import secrets; print(secrets.token_urlsafe(32))"`.',
+        )
+
+    scopes = sorted(str(scope) for scope in settings.api_token_scopes)
+    return CheckResult(
+        "api authentication",
+        CheckStatus.PASS,
+        f"bearer token configured for actor {settings.api_token_actor_id!r} "
+        f"with {len(scopes)} scope(s): {', '.join(scopes)}",
     )
 
 
