@@ -49,10 +49,37 @@ typed actor identity that survives the whole run.
 - CLI keeps driving the runtime in-process, labelled `local_process`, with the
   reasoning documented rather than a token check that would enforce nothing
 
-**Deliberately not yet:** multiple tokens, rotation, expiry, mTLS, node
-identities, OIDC, per-actor policy. The `Authenticator` protocol and the
-`TokenCredential` list are the seams these arrive through; none of them requires
+**Deliberately not yet:** mTLS, node identities, OIDC, per-actor policy. The
+`Authenticator` protocol is the seam these arrive through; none of them requires
 reworking the token checker.
+
+### Shipped: credential lifecycle (v0.2.1) ✅
+
+One token meaning one identity was the next limitation to fall. Authority is now
+per-credential, and a credential is a separate thing from the actor it proves -
+which is what makes several keys per principal, and losing one of them, ordinary
+events rather than outages.
+
+- Persisted credentials with their own actor, type, scopes and metadata; one
+  actor may hold any number
+- `scrappy token create / list / inspect / rotate / revoke / prune`
+- Raw tokens shown once and never stored: what persists is
+  `HMAC-SHA256(pepper, secret)` under a non-secret credential id, so lookup stays
+  O(1) and a copied database yields verifiers rather than tokens
+- Expiry optional per credential, evaluated against the clock on every request
+- Revocation effective on the next request - no cache, no restart
+- Overlap rotation: the replacement is issued while the original still works, in
+  one transaction, so no failure leaves a principal with nothing valid
+- Every administrative change audited with the administrator's own identity, and
+  every request's audit row naming the credential that proved it
+- `SCRAPPY_API_TOKEN` still accepted, with stored credentials taking precedence;
+  `doctor` reports pepper provenance and warns while both are in use
+
+**Deliberately not built:** HTTP credential administration (the CLI's authority
+is the local-process boundary, and an HTTP path would need a scope that can mint
+scopes), and `token migrate-legacy` - it could not preserve the old token's
+value, so every client needs reconfiguring either way and the command would save
+typing rather than risk.
 
 ### Still to come in v0.2
 

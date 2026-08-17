@@ -185,8 +185,9 @@ The settings that matter most:
 | `SCRAPPY_SHELL_DENYLIST` | `rm,dd,mkfs,shutdown,…` | Never runnable, even with approval |
 | `SCRAPPY_ALLOW_APPROVALS` | `true` | `false` denies privileged work outright |
 | `SCRAPPY_API_HOST` | `127.0.0.1` | Loopback default; authentication is not a reason to change it |
-| `SCRAPPY_API_TOKEN` | *(unset)* | Bearer token for the API. Unset = no valid credential, so every authenticated endpoint refuses |
-| `SCRAPPY_API_TOKEN_SCOPES` | *(all)* | Narrow the token, e.g. `task:read,audit:read` |
+| `SCRAPPY_TOKEN_PEPPER` | *(generated)* | Key the stored credential verifiers are computed under. Set it: the generated fallback lives beside the database it protects |
+| `SCRAPPY_API_TOKEN` | *(unset)* | Legacy single bearer token, still accepted. Prefer `scrappy token create` |
+| `SCRAPPY_API_TOKEN_SCOPES` | *(all)* | Narrow the legacy token, e.g. `task:read,audit:read` |
 
 `scrappy config show` prints the effective configuration. Secrets appear as
 `<set>` / `<unset>` and are never written to logs or the audit database.
@@ -209,7 +210,18 @@ scrappy approvals           Approval requests waiting for a human
 scrappy approve ID          Resolve one (--deny to refuse)
 scrappy tools               Registered tools and their risk classifications
 scrappy config show         Effective configuration, secrets redacted
-scrappy serve               Run the local API on 127.0.0.1:8787 (needs SCRAPPY_API_TOKEN)
+scrappy serve               Run the local API on 127.0.0.1:8787
+
+scrappy token create        Issue a credential (prints the token once, never again)
+  --actor ID                  who it authenticates as
+  --type human|service|node   what kind of principal
+  --scopes a,b,c              exactly what it may do
+  --expires-in 30d            optional; omit and it never ages out
+scrappy token list          Every credential and its status. Never a secret
+scrappy token inspect ID    One credential in full, minus the secret
+scrappy token rotate ID     Issue a replacement; the original stays valid
+scrappy token revoke ID     Withdraw it, effective on the next request
+scrappy token prune         Delete long-retired credential records
 ```
 
 ## API
@@ -230,22 +242,35 @@ POST /approvals/{id}          approval:grant
 GET  /audit                   audit:read
 ```
 
-Set a token and use it:
+Issue a credential and use it:
 
 ```bash
-python -c "import secrets; print(secrets.token_urlsafe(32))"   # generate
-export SCRAPPY_API_TOKEN=<paste>                                # or put it in .env
+export SCRAPPY_TOKEN_PEPPER=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+scrappy token create --actor deploy-bot --type service --scopes task:create,task:read
+# → scrp_a8f13e9c2b41_<secret>   shown once, stored only as a keyed verifier
+
 scrappy serve
 
-curl -H "Authorization: Bearer $SCRAPPY_API_TOKEN" \
+curl -H "Authorization: Bearer scrp_a8f13e9c2b41_<secret>" \
      -d '{"objective":"check disk usage"}' \
      -H 'Content-Type: application/json' \
      http://127.0.0.1:8787/tasks
 ```
 
-**Leaving `SCRAPPY_API_TOKEN` unset does not disable authentication.** It means
-no credential is valid, so everything except `/health` returns 401. An
-unconfigured deployment fails closed.
+Each credential is its own principal: its own actor, its own scopes, its own
+line in the audit trail. One person or service may hold several, so losing a
+laptop key is `scrappy token revoke` rather than an outage. Revocation takes
+effect on the next request - there is no cache and no restart. See
+[docs/CREDENTIALS.md](docs/CREDENTIALS.md) for rotation, expiry and the storage
+design.
+
+**Having no credential does not disable authentication.** It means nothing is
+valid, so everything except `/health` returns 401. An unconfigured deployment
+fails closed.
+
+`SCRAPPY_API_TOKEN` still works for deployments that predate this, and stored
+credentials take precedence over it. It has no expiry and withdrawing it needs a
+restart, so `doctor` warns while both are in use.
 
 401 means the caller is unidentified; 403 means it is identified and lacks the
 scope. Identity comes from the credential only - `POST /tasks` no longer accepts

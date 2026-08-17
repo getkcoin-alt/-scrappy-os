@@ -286,6 +286,21 @@ you reach me" and never "who are you". Concretely, on a host running v0.1:
 - **No rate limiting.** Guessing is unthrottled by Scrappy OS; entropy in the
   token is what makes guessing impractical, so a short token is a real weakness
   (`doctor` warns below 16 characters).
+- **A credential id is weakly distinguishable by timing.** Measured, not
+  assumed. Authentication does the HMAC either way - a miss is verified against
+  a dummy verifier precisely so the comparison cannot be timed - but a row that
+  *exists* is then decoded into a `Credential`, and a row that does not is not.
+  Over 150 interleaved pairs against a live loopback instance, a present id was
+  slower in 67% of pairs, median +0.13 ms against a ~2.3 ms request. That is a
+  real oracle for "does this credential id exist" and it is reported here rather
+  than papered over.
+
+  It is not treated as exploitable, for a reason worth stating: the id is 48
+  bits, so even a perfect oracle leaves ~2^47 probes at milliseconds each. The
+  search space, not the timing, is what makes enumeration impractical - and if
+  that is ever untrue the fix is rate limiting, not fake work in the decode
+  path. Deliberately not "fixed" by padding, which would be untestable and would
+  rot silently the first time the decode path changed.
 - **Credential administration is unauthenticated.** `scrappy token create` will
   mint any scope for anyone who can run it. The boundary is host file
   permissions; the mitigation is that every issuance is audited with the
@@ -386,3 +401,7 @@ make security-test        # or: pytest tests/security -v
   restart
 - `test_doctor_credentials.py` - the pepper report, and that reporting on it
   never creates or prints one
+- `test_multi_principal.py` - two credentials as two principals through the real
+  HTTP stack: separate scopes, separate audit attribution, rotation overlap,
+  revocation without a restart, and the abuse cases (oversized headers,
+  duplicate headers, prefix confusion, hostile display names, Unicode actors)
