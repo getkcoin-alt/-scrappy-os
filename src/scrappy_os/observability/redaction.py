@@ -53,9 +53,32 @@ SENSITIVE_VALUE_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
 )
 
 
+#: Keys that contain a word from :data:`SENSITIVE_KEY_PARTS` but hold an
+#: identifier rather than a secret, and must survive redaction.
+#:
+#: The substring heuristic above is deliberately broad, which means it also
+#: catches names like ``credential_id`` (contains "credential") and
+#: ``auth_method`` (contains "auth"). Redacting those is not merely untidy: the
+#: audit trail is required to record *which* credential was revoked and *how* a
+#: principal authenticated, and a trail that says ``[REDACTED]`` cannot answer
+#: either question. These are exact-match entries, never substrings, so adding
+#: one cannot accidentally widen what gets through.
+NON_SECRET_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "auth_method",
+        "authentication_method",
+        "credential_count",
+        "credential_id",
+        "rotated_from",
+    }
+)
+
+
 def is_sensitive_key(key: str) -> bool:
     """Whether a mapping key should have its value hidden outright."""
     lowered = key.lower()
+    if lowered in NON_SECRET_KEYS:
+        return False
     return any(part in lowered for part in SENSITIVE_KEY_PARTS)
 
 
@@ -115,6 +138,7 @@ def sha256_of(value: str | bytes) -> str:
 
 
 __all__ = [
+    "NON_SECRET_KEYS",
     "REDACTED",
     "SENSITIVE_KEY_PARTS",
     "SENSITIVE_VALUE_PATTERNS",
