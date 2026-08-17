@@ -9,11 +9,17 @@ because a WARN in that state is something an operator scrolls past.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from pydantic import SecretStr
 
 from scrappy_os.core.config import ScrappySettings
+from scrappy_os.core.identity import ActorType, Scope
 from scrappy_os.interface.doctor import CheckStatus, run_doctor
+from scrappy_os.memory.store import Store
+from scrappy_os.security.credential_store import SqliteCredentialStore
+from scrappy_os.security.credentials import issue_credential
 
 pytestmark = pytest.mark.security
 
@@ -61,7 +67,7 @@ async def test_exposed_without_a_token_is_a_failure(settings: ScrappySettings) -
     binding = _check(report, "api binding")
     assert binding.status is CheckStatus.FAIL  # type: ignore[attr-defined]
     assert "reachable off this host" in binding.detail  # type: ignore[attr-defined]
-    assert "SCRAPPY_API_TOKEN" in binding.remedy  # type: ignore[attr-defined]
+    assert "scrappy token create" in binding.remedy  # type: ignore[attr-defined]
     assert report.healthy is False, "doctor must exit non-zero here"  # type: ignore[attr-defined]
 
 
@@ -177,7 +183,7 @@ async def test_a_whitespace_only_token_is_reported_as_no_token(
     assert settings.api_auth_configured is False
     result = _check(await _report(settings), "api authentication")
     assert result.status is CheckStatus.WARN  # type: ignore[attr-defined]
-    assert "no SCRAPPY_API_TOKEN" in result.detail  # type: ignore[attr-defined]
+    assert "nothing can authenticate" in result.detail  # type: ignore[attr-defined]
 
 
 async def test_a_whitespace_only_token_on_an_exposed_bind_still_fails(
@@ -190,3 +196,93 @@ async def test_a_whitespace_only_token_on_an_exposed_bind_still_fails(
     report = await _report(settings)
     assert _check(report, "api binding").status is CheckStatus.FAIL  # type: ignore[attr-defined]
     assert report.healthy is False  # type: ignore[attr-defined]
+
+
+# --- Stored credentials are the other way to be authenticated ---------------
+#
+# Both checks above once consulted SCRAPPY_API_TOKEN alone. That was true when
+# it was the only mechanism and became wrong in v0.2.1, in both directions:
+# doctor announced that nothing could authenticate while an issued credential
+# was working, and its remedy pointed an operator at the weaker mechanism.
+
+
+async def _issue_credential(settings: ScrappySettings) -> None:
+    """Put one usable credential in the database doctor will read."""
+    settings.ensure_directories()
+    store = Store(settings.db_path)
+    await store.connect()
+    try:
+        await SqliteCredentialStore(store).create(
+            issue_credential(
+                actor_id="svc-doctor",
+                actor_type=ActorType.SERVICE,
+                scopes=frozenset({Scope.TASK_READ}),
+                pepper="doctor-test-pepper-long-enough",
+            ).credential
+        )
+    finally:
+        await store.close()
+
+
+async def test_a_stored_credential_is_authentication(settings: ScrappySettings) -> None:
+    """Doctor must not report a refusal that the API does not actually make."""
+    settings.api_host = "127.0.0.1"
+    settings.api_token = None
+    await _issue_credential(settings)
+
+    result = _check(await _report(settings), "api authentication")
+    assert result.status is CheckStatus.PASS  # type: ignore[attr-defined]
+    assert "1 stored credential(s)" in result.detail  # type: ignore[attr-defined]
+
+
+async def test_an_exposed_bind_is_safe_on_stored_credentials_alone(
+    settings: ScrappySettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wrong FAIL. Issued credentials are the *stronger* mechanism.
+
+    euid is pinned for the same reason as the token case above: this asserts on
+    the whole report, and root-plus-exposed fails the privilege check on its own
+    account.
+    """
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
+    settings.api_host = "0.0.0.0"
+    settings.api_token = None
+    await _issue_credential(settings)
+
+    report = await _report(settings)
+    assert _check(report, "api binding").status is not CheckStatus.FAIL  # type: ignore[attr-defined]
+    assert report.healthy is True  # type: ignore[attr-defined]
+
+
+async def test_a_revoked_credential_stops_counting(settings: ScrappySettings) -> None:
+    """The count is of credentials that can authenticate, not rows."""
+    settings.api_host = "0.0.0.0"
+    settings.api_token = None
+    await _issue_credential(settings)
+
+    settings.ensure_directories()
+    store = Store(settings.db_path)
+    await store.connect()
+    try:
+        credentials = SqliteCredentialStore(store)
+        for credential in await credentials.list():
+            await credentials.revoke(credential.credential_id, when=datetime.now(UTC))
+    finally:
+        await store.close()
+
+    report = await _report(settings)
+    assert _check(report, "api binding").status is CheckStatus.FAIL  # type: ignore[attr-defined]
+
+
+async def test_the_legacy_token_is_flagged_once_credentials_exist(
+    settings: ScrappySettings,
+) -> None:
+    """Both accepted, so say which one is the liability."""
+    settings.api_host = "127.0.0.1"
+    settings.api_token = SecretStr(TOKEN)
+    await _issue_credential(settings)
+
+    result = _check(await _report(settings), "api authentication")
+    assert result.status is CheckStatus.WARN  # type: ignore[attr-defined]
+    assert "still accepted" in result.detail  # type: ignore[attr-defined]
+    assert "restart" in result.remedy  # type: ignore[attr-defined]

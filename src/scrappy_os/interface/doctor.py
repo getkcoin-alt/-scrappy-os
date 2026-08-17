@@ -81,6 +81,7 @@ async def run_doctor(
     check_provider: bool = True,
 ) -> DoctorReport:
     """Run every check and collect the results."""
+    stored = await _count_active_credentials(settings)
     results: list[CheckResult] = [
         _check_python(),
         _check_settings(settings),
@@ -88,8 +89,8 @@ async def run_doctor(
         _check_workspace(settings),
         _check_read_roots(settings),
         _check_privileges(settings),
-        _check_api_binding(settings),
-        _check_api_authentication(settings),
+        _check_api_binding(settings, stored),
+        _check_api_authentication(settings, stored),
         _check_shell_config(settings),
         _check_optional_binaries(),
     ]
@@ -273,7 +274,33 @@ def _check_privileges(settings: ScrappySettings) -> CheckResult:
     )
 
 
-def _check_api_binding(settings: ScrappySettings) -> CheckResult:
+def _can_identify_a_caller(settings: ScrappySettings, stored: int | None) -> bool:
+    """Whether *anything* could authenticate to the API right now.
+
+    Two independent sources: the legacy ``SCRAPPY_API_TOKEN`` and credentials in
+    the database. ``settings.api_exposure_is_unsafe`` only knows about the first,
+    because settings must be constructible without touching the filesystem - so
+    the judgement is made here, where the database has already been read.
+
+    ``stored`` is None when the count could not be taken. That is treated as
+    "none", which is the fail-closed direction: an unverifiable claim that
+    someone can authenticate is not one doctor should make on an exposed bind.
+    """
+    return settings.api_auth_configured or bool(stored)
+
+
+def _describe_identity_sources(settings: ScrappySettings, stored: int | None) -> str:
+    if stored is None:
+        return "credential count unavailable"
+    parts = []
+    if settings.api_auth_configured:
+        parts.append("SCRAPPY_API_TOKEN set")
+    if stored:
+        parts.append(f"{stored} stored credential(s)")
+    return ", ".join(parts) if parts else "no credential"
+
+
+def _check_api_binding(settings: ScrappySettings, stored: int | None = None) -> CheckResult:
     """Bind address and credentials, judged together.
 
     Neither fact is alarming alone. Loopback with no token is the default and is
@@ -283,23 +310,23 @@ def _check_api_binding(settings: ScrappySettings) -> CheckResult:
     failure, because a warning in that state is something an operator scrolls
     past.
     """
-    if settings.api_exposure_is_unsafe:
+    if not settings.api_is_local_only and not _can_identify_a_caller(settings, stored):
         return CheckResult(
             "api binding",
             CheckStatus.FAIL,
             f"API binds {settings.api_host}:{settings.api_port} - reachable off this host - "
-            "and SCRAPPY_API_TOKEN is not set, so no caller can be identified",
-            "Set SCRAPPY_API_TOKEN, or bind loopback with SCRAPPY_API_HOST=127.0.0.1. "
-            "Until then every authenticated endpoint refuses, so this instance is "
-            "exposed and useless at the same time.",
+            "and nothing can authenticate, so no caller can be identified",
+            "Issue a credential with `scrappy token create`, or bind loopback with "
+            "SCRAPPY_API_HOST=127.0.0.1. Until then every authenticated endpoint "
+            "refuses, so this instance is exposed and useless at the same time.",
         )
 
     if settings.api_is_local_only:
-        credentials = "token set" if settings.api_auth_configured else "no token set"
         return CheckResult(
             "api binding",
             CheckStatus.PASS,
-            f"{settings.api_host}:{settings.api_port} (local only, {credentials})",
+            f"{settings.api_host}:{settings.api_port} (local only, "
+            f"{_describe_identity_sources(settings, stored)})",
         )
 
     return CheckResult(
@@ -313,27 +340,48 @@ def _check_api_binding(settings: ScrappySettings) -> CheckResult:
     )
 
 
-def _check_api_authentication(settings: ScrappySettings) -> CheckResult:
+def _check_api_authentication(
+    settings: ScrappySettings, stored: int | None = None
+) -> CheckResult:
     """Whether the API can identify anyone, and how well.
 
     Reports the presence and shape of the credential. It never reports the
     credential: the value is not read here, only its length and its existence.
+
+    Stored credentials are checked first because they are the better mechanism:
+    they expire, they can be revoked without a restart, and each one names its
+    own actor. Reporting "nothing can authenticate" while a stored credential is
+    working - which is what this check did before v0.2.1 - is worse than noise,
+    because the remedy attached to it points at the weaker legacy token.
     """
+    if stored:
+        detail = f"{stored} stored credential(s) can authenticate"
+        if settings.api_auth_configured:
+            return CheckResult(
+                "api authentication",
+                CheckStatus.WARN,
+                detail + "; SCRAPPY_API_TOKEN is also set and still accepted",
+                "The legacy token has no expiry and needs a restart to withdraw. "
+                "Once every client is on an issued credential, unset it.",
+            )
+        return CheckResult("api authentication", CheckStatus.PASS, detail)
+
     if not settings.api_auth_configured:
-        detail = "no SCRAPPY_API_TOKEN set; every authenticated endpoint will refuse"
+        detail = "nothing can authenticate; every authenticated endpoint will refuse"
         if settings.api_is_local_only:
             return CheckResult(
                 "api authentication",
                 CheckStatus.WARN,
                 detail + " (the API is loopback-only, so nothing is exposed)",
-                "Set SCRAPPY_API_TOKEN to use the HTTP API. The CLI works without one - "
-                "it drives the runtime in-process.",
+                "Run `scrappy token create` to use the HTTP API. The CLI works "
+                "without one - it drives the runtime in-process.",
             )
         return CheckResult(
             "api authentication",
             CheckStatus.FAIL,
             detail,
-            "Set SCRAPPY_API_TOKEN before binding a non-loopback address.",
+            "Issue a credential with `scrappy token create` before binding a "
+            "non-loopback address.",
         )
 
     token = settings.api_token
@@ -426,6 +474,25 @@ async def _check_database(settings: ScrappySettings) -> CheckResult:
             f"Check permissions on {settings.db_path}, or remove it to recreate the schema.",
         )
     return CheckResult("database", CheckStatus.PASS, detail)
+
+
+async def _count_active_credentials(settings: ScrappySettings) -> int | None:
+    """Stored credentials that could authenticate right now, or None if unknown.
+
+    Swallows its own errors and returns None rather than raising, because two
+    other checks consult this and a missing database must not turn the bind
+    address report into a stack trace. The credentials check below does the same
+    read without the net, so a broken database is still reported once, loudly,
+    under its own name.
+    """
+    store = Store(settings.db_path)
+    try:
+        await store.connect()
+        return await SqliteCredentialStore(store).count_active(now=datetime.now(UTC))
+    except Exception:  # noqa: BLE001 - reported by the credentials check
+        return None
+    finally:
+        await store.close()
 
 
 async def _check_credentials(settings: ScrappySettings) -> CheckResult:
