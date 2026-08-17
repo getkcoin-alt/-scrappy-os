@@ -15,7 +15,14 @@ from scrappy_os.core.config import ScrappySettings
 from scrappy_os.core.enums import EventType, RiskLevel
 from scrappy_os.core.models import AuditEvent, ToolCall
 from scrappy_os.observability.logging import configure_logging, get_logger
-from scrappy_os.observability.redaction import REDACTED, redact, redact_text
+from scrappy_os.observability.redaction import (
+    NON_SECRET_KEYS,
+    REDACTED,
+    SENSITIVE_KEY_PARTS,
+    is_sensitive_key,
+    redact,
+    redact_text,
+)
 from scrappy_os.security.audit import AuditLog
 
 pytestmark = pytest.mark.security
@@ -161,3 +168,58 @@ def test_oversized_strings_are_truncated_not_dropped() -> None:
     result = redact({"body": "x" * 20000})["body"]
     assert len(result) < 20000
     assert "truncated" in result
+
+
+# --- The identity allowlist -------------------------------------------------
+#
+# The key heuristic is a substring match, so it catches names that merely
+# contain a secret-sounding word while holding an identifier: credential_id
+# contains "credential", auth_method contains "auth". Those two are exactly what
+# the audit trail must record - which credential, and how the principal proved
+# itself - so an allowlist carves them back out. An allowlist on a redaction
+# sweep is a hole by construction, so what is tested here is mostly its edges.
+
+
+@pytest.mark.parametrize("key", sorted(NON_SECRET_KEYS))
+def test_identity_keys_survive_redaction(key: str) -> None:
+    """A trail that says [REDACTED] cannot say which credential was revoked."""
+    assert redact({key: "cred_a8f13e9c2b41"})[key] == "cred_a8f13e9c2b41"
+
+
+def test_the_allowlist_holds_no_genuinely_secret_name() -> None:
+    """The regression that matters: adding "token" here would open a leak.
+
+    Every entry must be a name that carries an identifier. This asserts the
+    property rather than the current contents, so it fails on the *addition*
+    rather than years later on the leak.
+    """
+    for key in NON_SECRET_KEYS:
+        assert not key.endswith(("_token", "_secret", "_key", "_password")), key
+        assert key not in SENSITIVE_KEY_PARTS, key
+
+
+def test_the_allowlist_is_exact_match_not_substring() -> None:
+    """Otherwise "credential_id" would also unmask "credential_id_secret"."""
+    assert is_sensitive_key("credential_id_secret")
+    assert is_sensitive_key("x_credential_id")
+    assert not is_sensitive_key("credential_id")
+
+
+def test_the_allowlist_ignores_case_like_the_sweep_it_amends() -> None:
+    assert redact({"Credential_ID": "cred_a8f13e9c2b41"})["Credential_ID"] != REDACTED
+
+
+def test_a_secret_beside_an_identity_key_is_still_masked() -> None:
+    """The allowlist exempts a name, never the payload it appears in."""
+    result = redact(
+        {
+            "credential_id": "cred_a8f13e9c2b41",
+            "auth_method": "bearer_token",
+            "token": CANARY,
+            "note": f"issued {CANARY}",
+        }
+    )
+    assert result["credential_id"] == "cred_a8f13e9c2b41"
+    assert result["auth_method"] == "bearer_token"
+    assert result["token"] == REDACTED
+    assert CANARY not in json.dumps(result)
