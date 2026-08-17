@@ -36,6 +36,8 @@ from scrappy_os.security.audit import AuditLog
 from scrappy_os.security.authn import (
     AuthenticationFailed,
     Authenticator,
+    AuthFailureDetail,
+    AuthFailureReason,
 )
 from scrappy_os.security.authz import AUTHORIZER, AuthorizationVerdict
 
@@ -153,20 +155,43 @@ async def authenticate_request(request: Request) -> RequestSecurityContext:
         return cached
 
     authenticator = _authenticator(request)
-    header = request.headers.get("Authorization")
+    presented = request.headers.getlist("Authorization")
 
     try:
-        actor = await authenticator.authenticate(header)
+        if len(presented) > 1:
+            # `headers.get` would hand back the first and silently drop the rest,
+            # so a request carrying two credentials would authenticate as one of
+            # them with nothing recording that the other was there. That matters
+            # behind a proxy that adds its own Authorization header: the proxy
+            # would enforce on one credential and this server would audit the
+            # other. RFC 9110 permits rejecting the message; refusing is the only
+            # reading with a single answer.
+            raise AuthenticationFailed(
+                AuthFailureReason.MALFORMED_CREDENTIAL,
+                "exactly one Authorization header is permitted",
+                AuthFailureDetail.DUPLICATE_HEADER,
+            )
+        actor = await authenticator.authenticate(presented[0] if presented else None)
     except AuthenticationFailed as exc:
+        # `detail` separates "an expired credential was presented" from "someone
+        # is guessing ids" for whoever reads the trail. It goes to the audit row
+        # and the log; the response below is byte-identical either way, because
+        # telling the caller which of those it hit is the enumeration oracle this
+        # whole design avoids.
         await _record(
             request,
             EventType.AUTH_FAILED,
             actor=ANONYMOUS_ACTOR,
-            payload={"reason": str(exc.reason), **_request_facts(request)},
+            payload={
+                "reason": str(exc.reason),
+                **({"detail": str(exc.detail)} if exc.detail else {}),
+                **_request_facts(request),
+            },
         )
         logger.warning(
             "authentication_failed",
             reason=str(exc.reason),
+            detail=str(exc.detail) if exc.detail else None,
             path=request.url.path,
             outcome="denied",
         )
@@ -184,11 +209,29 @@ async def authenticate_request(request: Request) -> RequestSecurityContext:
         actor=actor,
         payload={
             **actor.audit_fields(),
+            **_proving_credential(actor),
             "request_id": context.request_id,
             **_request_facts(request),
         },
     )
     return context
+
+
+def _proving_credential(actor: Actor) -> dict[str, str]:
+    """The credential id that proved this actor, if one did.
+
+    ``Actor.audit_fields`` deliberately omits ``metadata``, which is free-form
+    and belongs to whichever authenticator populated it. But one key in there is
+    identity rather than commentary: which credential was presented. Once an
+    actor may hold several - a laptop key and a CI key - "who acted" stops being
+    enough to answer "which key do I revoke", and that question is the entire
+    reason credentials are separate from actors.
+
+    Read by name rather than merged wholesale, so a future authenticator putting
+    something chatty in metadata cannot widen what lands in the trail.
+    """
+    credential_id = actor.metadata.get("credential_id")
+    return {"credential_id": str(credential_id)} if credential_id else {}
 
 
 def require_scope(scope: Scope) -> Callable[[Request], Awaitable[RequestSecurityContext]]:

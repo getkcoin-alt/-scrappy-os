@@ -73,17 +73,59 @@ class AuthFailureReason(StrEnum):
     """The deployment has no token set, so nothing can authenticate."""
 
 
+class AuthFailureDetail(StrEnum):
+    """Why a *well-formed* credential was refused. For the operator only.
+
+    Every value here maps to :attr:`AuthFailureReason.UNKNOWN_CREDENTIAL` on the
+    wire, so nothing in this enum is observable by the caller that triggered it.
+    The distinction exists because "an expired credential was presented" and
+    "someone is guessing credential ids" are the same 401 and completely
+    different operational events - the first is a client nobody migrated, the
+    second is worth looking at.
+
+    It is an enum rather than a string for a structural reason: an audit field
+    that can only hold one of these cannot be made to carry attacker-controlled
+    content, however the call site is later edited.
+    """
+
+    DUPLICATE_HEADER = "duplicate_authorization_header"
+    """More than one Authorization header on one request."""
+
+    NOT_A_CREDENTIAL_TOKEN = "not_a_credential_token"  # noqa: S105 - a category, not a secret
+    """Well-formed Bearer header, but not this system's token format."""
+
+    NO_SUCH_CREDENTIAL = "no_such_credential"
+    """Parsed cleanly; the credential id is not in the store."""
+
+    SECRET_MISMATCH = "secret_mismatch"  # noqa: S105 - a category, not a secret
+    """The credential id exists and the secret did not verify."""
+
+    CREDENTIAL_EXPIRED = "credential_expired"
+    """Right secret, past ``expires_at``."""
+
+    CREDENTIAL_REVOKED = "credential_revoked"
+    """Right secret, deliberately withdrawn."""
+
+
 class AuthenticationFailed(ScrappyError):
     """A credential was absent, malformed or unrecognised.
 
-    Carries the reason category and nothing else. In particular it never carries
-    the presented value, so a traceback, a log line or an audit row derived from
-    this exception cannot leak a credential.
+    Carries the reason category, an optional operator-only detail, and nothing
+    else. In particular it never carries the presented value, so a traceback, a
+    log line or an audit row derived from this exception cannot leak a
+    credential.
     """
 
-    def __init__(self, reason: AuthFailureReason, message: str) -> None:
+    def __init__(
+        self,
+        reason: AuthFailureReason,
+        message: str,
+        detail: AuthFailureDetail | None = None,
+    ) -> None:
         super().__init__(message, reason=str(reason))
         self.reason = reason
+        #: Never rendered into a response. See :class:`AuthFailureDetail`.
+        self.detail = detail
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,20 +358,22 @@ class CredentialAuthenticator:
             # "no such credential" and "wrong secret" take comparable time and
             # an attacker cannot probe which ids exist by timing the response.
             verify_secret(secret, _ABSENT_CREDENTIAL_VERIFIER, pepper=self._pepper)
-            raise self._unknown()
+            raise self._unknown(AuthFailureDetail.NO_SUCH_CREDENTIAL)
 
         if not verify_secret(secret, credential.verifier, pepper=self._pepper):
-            raise self._unknown()
+            raise self._unknown(AuthFailureDetail.SECRET_MISMATCH)
 
         now = self._now()
         status = credential.status_at(now)
         if status is not CredentialStatus.ACTIVE:
             # The secret was right, so this is a real holder of a credential that
-            # is no longer valid. Worth distinguishing internally; still one
+            # is no longer valid. Distinguished for the operator, who needs to
+            # tell a client nobody migrated from someone probing ids; still one
             # answer to the client.
-            raise AuthenticationFailed(
-                AuthFailureReason.UNKNOWN_CREDENTIAL,
-                "the presented credential is not recognised",
+            raise self._unknown(
+                AuthFailureDetail.CREDENTIAL_REVOKED
+                if status is CredentialStatus.REVOKED
+                else AuthFailureDetail.CREDENTIAL_EXPIRED
             )
 
         if self._on_authenticated is not None:
@@ -338,14 +382,15 @@ class CredentialAuthenticator:
 
     async def _try_legacy(self, header: str | None) -> Actor:
         if self._legacy is None:
-            raise self._unknown()
+            raise self._unknown(AuthFailureDetail.NOT_A_CREDENTIAL_TOKEN)
         return await self._legacy.authenticate(header)
 
     @staticmethod
-    def _unknown() -> AuthenticationFailed:
+    def _unknown(detail: AuthFailureDetail | None = None) -> AuthenticationFailed:
         return AuthenticationFailed(
             AuthFailureReason.UNKNOWN_CREDENTIAL,
             "the presented credential is not recognised",
+            detail,
         )
 
 
@@ -392,6 +437,7 @@ def build_authenticator(
 __all__ = [
     "BEARER_SCHEME",
     "MIN_TOKEN_LENGTH",
+    "AuthFailureDetail",
     "AuthFailureReason",
     "AuthenticationFailed",
     "Authenticator",
