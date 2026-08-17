@@ -29,7 +29,7 @@ src/scrappy_os/
 ├── agents/         Brahma, Vishnu, Mahesh + the schemas they may emit
 ├── brain/          Orchestration loop and execution budgets
 ├── tools/          Tool protocol, registry, executor, and the tools themselves
-├── security/       Paths, risk classification, policy, approvals, audit, authn, authz
+├── security/       Paths, risk, policy, approvals, audit, authn, authz, credentials
 ├── memory/         Working, episodic, semantic; the SQLite store
 ├── heart/          Runtime supervisor: lifecycle and health
 ├── breath/         Heartbeat
@@ -361,6 +361,46 @@ Nothing consults a module-level "current actor", because `POST /tasks` returns
 202 and leaves an asyncio task running after the request that authenticated it
 has finished; a global would be read by the wrong task under any concurrency.
 
+## Credentials, and why they are not actors
+
+An actor is *who*. A credential is *one way of proving it*. Collapsing the two
+is the usual shortcut and it makes three ordinary operations impossible: a
+person cannot hold both a laptop key and a CI key, losing one key cannot be
+undone without deleting the person, and rotation cannot overlap - the old key
+must die before the new one is trusted. Keeping them separate costs one table.
+
+```
+core/identity.py              Actor, ActorType, Scope        (vocabulary)
+security/credentials.py       token format, verifiers, lifecycle state
+security/pepper.py            where the HMAC key comes from
+security/credential_store.py  CredentialStore protocol + SQLite
+security/credential_service.py  create/revoke/rotate/prune, each audited
+security/authn.py             CredentialAuthenticator: token -> Actor
+interface/token_cli.py        scrappy token
+```
+
+The dependency order is the interesting part. `credentials.py` knows nothing
+about storage, `credential_store.py` knows nothing about audit, and
+`credential_service.py` is the only thing that knows both - which is what makes
+"administrative changes to authority are always recorded" a property of the
+layering rather than a habit. The CLI cannot reach the store directly, so it
+cannot mint a credential without an audit row.
+
+Nothing persists a token. What is stored is `HMAC-SHA256(pepper, secret)` under
+a non-secret `credential_id`, so the id in `scrp_<id>_<secret>` selects one row
+to check rather than forcing a scan of every credential. Deriving the actor from
+that row - never from anything in the request - is what makes identity
+unforgeable by a client that decorates its own headers.
+
+On every request `CredentialAuthenticator` reads the row, evaluates
+revoked/expired against the clock, and compares in constant time. Reading each
+time is a deliberate cost: there is no cache, so `scrappy token revoke` takes
+effect on the next call rather than on the next restart. `CredentialStore` is a
+protocol because node identities and a shared control plane are the next two
+things that need to live somewhere other than local SQLite; `SupportsDeletion`
+is separate from it so an append-only store can legitimately refuse to prune
+instead of silently reporting rows removed that are still there.
+
 ## Extension points
 
 | To add… | Do this | Not this |
@@ -369,7 +409,8 @@ has finished; a global would be read by the wrong task under any concurrency.
 | A model backend | Implement `ModelProvider`, `register_provider` | Special-case it in an agent |
 | A different transport | Implement the `EventBus` protocol | Rewrite the orchestrator |
 | An authentication method | Implement the `Authenticator` protocol | Add a branch to the token checker |
-| More API credentials | Add `TokenCredential` entries | Introduce a second code path |
+| More API credentials | `scrappy token create` | Introduce a second code path |
+| Somewhere else to keep credentials | Implement `CredentialStore` | Query SQLite from the authenticator |
 | Per-actor policy | Read `PolicyContext.actor` in a rule | Check identity in an endpoint |
 | Durable storage | Write a second `Store` | Add an ORM |
 | Semantic recall | Implement `SemanticMemory` | Change how agents read memory |
