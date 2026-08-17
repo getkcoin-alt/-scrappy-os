@@ -16,6 +16,7 @@ import shutil
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from scrappy_os.core.config import ScrappySettings
 from scrappy_os.memory.store import Store
 from scrappy_os.models.registry import ModelRouter
 from scrappy_os.security.authn import MIN_TOKEN_LENGTH
+from scrappy_os.security.credential_store import SqliteCredentialStore
+from scrappy_os.security.pepper import PEPPER_FILENAME
 from scrappy_os.tools.base import ToolRegistry
 
 MINIMUM_PYTHON = (3, 12)
@@ -91,6 +94,7 @@ async def run_doctor(
         _check_optional_binaries(),
     ]
     results.append(await _safely(lambda: _check_database(settings), "database"))
+    results.append(await _safely(lambda: _check_credentials(settings), "credentials"))
     if registry is not None:
         results.append(_check_tools(registry))
     if check_provider:
@@ -422,6 +426,75 @@ async def _check_database(settings: ScrappySettings) -> CheckResult:
             f"Check permissions on {settings.db_path}, or remove it to recreate the schema.",
         )
     return CheckResult("database", CheckStatus.PASS, detail)
+
+
+async def _check_credentials(settings: ScrappySettings) -> CheckResult:
+    """Where the token pepper lives, and how many credentials can authenticate.
+
+    Deliberately read-only. :func:`resolve_pepper` generates and persists a
+    fallback when none exists, which is right at startup and wrong here: running
+    ``doctor`` on a fresh install should not quietly create a key, and an
+    operator who then sets ``SCRAPPY_TOKEN_PEPPER`` would be left with an unused
+    file that looks like it is protecting something. So the file is inspected,
+    never created.
+
+    The pepper's *value* is never read - only whether it is configured, and the
+    mode of the file if one is on disk.
+    """
+    pepper_path = settings.data_dir / PEPPER_FILENAME
+    from_environment = (
+        settings.token_pepper is not None
+        and bool(settings.token_pepper.get_secret_value().strip())
+    )
+
+    active = 0
+    store = Store(settings.db_path)
+    try:
+        await store.connect()
+        credentials = SqliteCredentialStore(store)
+        active = await credentials.count_active(now=datetime.now(UTC))
+    finally:
+        await store.close()
+
+    summary = f"{active} active credential(s)"
+
+    if from_environment:
+        return CheckResult(
+            "credentials",
+            CheckStatus.PASS,
+            f"{summary}; pepper from SCRAPPY_TOKEN_PEPPER (environment)",
+        )
+
+    if not pepper_path.exists():
+        return CheckResult(
+            "credentials",
+            CheckStatus.WARN,
+            f"{summary}; no token pepper yet - one will be generated in the data "
+            "directory on first use",
+            "Set SCRAPPY_TOKEN_PEPPER before issuing credentials. Introducing it "
+            "later invalidates every credential issued under the generated one.",
+        )
+
+    mode = pepper_path.stat().st_mode & 0o777
+    if mode != 0o600:
+        return CheckResult(
+            "credentials",
+            CheckStatus.FAIL,
+            f"{summary}; token pepper at {pepper_path} is mode {mode:#o}, not 0o600 - "
+            "readable beyond its owner",
+            f"chmod 600 {pepper_path}. Anything that can read the pepper and the "
+            "database together can test guessed tokens offline.",
+        )
+
+    return CheckResult(
+        "credentials",
+        CheckStatus.WARN,
+        f"{summary}; token pepper generated in the data directory, beside the "
+        "database it protects",
+        "Set SCRAPPY_TOKEN_PEPPER so the key lives outside the data directory. "
+        "As it stands, one stolen directory yields both the verifiers and the key "
+        "needed to test guesses against them.",
+    )
 
 
 async def _check_provider(router: ModelRouter) -> CheckResult:
