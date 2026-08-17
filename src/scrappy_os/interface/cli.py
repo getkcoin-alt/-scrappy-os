@@ -59,6 +59,7 @@ from scrappy_os.interface.formatting import (
     success,
     warn,
 )
+from scrappy_os.interface.token_cli import token_app
 from scrappy_os.memory.store import open_store
 from scrappy_os.observability.logging import configure_logging
 from scrappy_os.security.approvals import ApprovalManager
@@ -72,6 +73,7 @@ app = typer.Typer(
 )
 config_app = typer.Typer(help="Inspect configuration.", no_args_is_help=True)
 app.add_typer(config_app, name="config")
+app.add_typer(token_app, name="token")
 
 
 def _settings(quiet: bool = True) -> ScrappySettings:
