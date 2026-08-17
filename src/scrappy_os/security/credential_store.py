@@ -99,6 +99,21 @@ _INSERT = """
 
 
 @runtime_checkable
+class SupportsDeletion(Protocol):
+    """A store that can forget credentials outright, not merely revoke them.
+
+    Separate from :class:`CredentialStore` because deletion is genuinely
+    optional: an append-only or WORM-backed store is a legitimate implementation
+    and should be able to refuse. Expressing that as its own protocol lets
+    ``prune`` ask "can this store delete?" and fail loudly when the answer is no,
+    instead of reporting rows removed that are still there.
+    """
+
+    async def delete_many(self, credential_ids: Sequence[str]) -> int:
+        """Remove the given credentials. Returns how many were deleted."""
+
+
+@runtime_checkable
 class CredentialStore(Protocol):
     """Where credentials live. Implementations must not interpret status."""
 
@@ -226,4 +241,4 @@ class SqliteCredentialStore:
         return sum(1 for credential in credentials if credential.is_usable_at(now))
 
 
-__all__ = ["CredentialStore", "SqliteCredentialStore"]
+__all__ = ["CredentialStore", "SqliteCredentialStore", "SupportsDeletion"]

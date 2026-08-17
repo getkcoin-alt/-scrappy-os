@@ -24,7 +24,7 @@ from scrappy_os.core.identity import Actor, ActorType, Scope
 from scrappy_os.core.models import AuditEvent
 from scrappy_os.observability.logging import get_logger
 from scrappy_os.security.audit import AuditLog
-from scrappy_os.security.credential_store import CredentialStore, SqliteCredentialStore
+from scrappy_os.security.credential_store import CredentialStore, SupportsDeletion
 from scrappy_os.security.credentials import (
     Credential,
     CredentialError,
@@ -78,18 +78,25 @@ class CredentialService:
         credential: Credential,
         **extra: object,
     ) -> None:
+        # audit_fields() carries actor_scopes, which is payload detail rather
+        # than a column on AuditEvent. Only the three identity columns are
+        # promoted; the rest travels in the payload.
+        identity = self._actor.audit_fields()
         await self._audit.record(
             AuditEvent(
                 event_type=event_type,
                 actor=self._actor.label,
                 component="credentials",
+                actor_id=identity["actor_id"],
+                actor_type=identity["actor_type"],
+                auth_method=identity["auth_method"],
                 payload={
                     **credential.audit_fields(),
                     "scopes": sorted(str(scope) for scope in credential.scopes),
                     "administered_by": self._actor.id,
+                    "administrator_scopes": identity["actor_scopes"],
                     **extra,
                 },
-                **self._actor.audit_fields(),
             )
         )
 
@@ -235,8 +242,19 @@ class CredentialService:
         if not doomed:
             return []
 
-        if isinstance(self._store, SqliteCredentialStore):
-            await self._store.delete_many([c.credential_id for c in doomed])
+        # Ask the store whether it can delete rather than testing for one
+        # concrete class. The isinstance check this replaces meant any store
+        # that was not SQLite skipped the deletion, still wrote
+        # ``credential.pruned`` audit events, and still returned the ids - so
+        # the operator was told records were gone while they were all still
+        # there. Refusing outright is the honest failure.
+        if not isinstance(self._store, SupportsDeletion):
+            raise CredentialError(
+                f"{type(self._store).__name__} cannot delete credentials, so there is "
+                "nothing to prune. Revoked credentials remain valid audit history; "
+                "no records were removed."
+            )
+        await self._store.delete_many([c.credential_id for c in doomed])
         for credential in doomed:
             await self._record(EventType.CREDENTIAL_PRUNED, credential)
         logger.info("credentials_pruned", count=len(doomed))
