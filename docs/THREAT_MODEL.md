@@ -273,21 +273,37 @@ you reach me" and never "who are you". Concretely, on a host running v0.1:
 - **Plaintext HTTP by default.** Scrappy OS does not terminate TLS. On loopback
   that is defensible; on any other interface an observer on the path reads the
   credential out of the first request.
-- **No expiry, no revocation list.** A stolen token works until an operator
-  changes the configuration and restarts.
+- **Revocation is fast; theft is still not detected.** Since v0.2.1 a stolen
+  credential dies on the next request after `scrappy token revoke`, with no
+  restart. Nothing tells an operator to run it: there is no anomaly detection,
+  and `last_used_at` is the only signal that a credential is in use at all.
+- **Expiry is opt-in.** A credential issued without `--expires-in` never ages
+  out, so an unnoticed theft is still indefinite.
+- **The stored verifier is not the token, but the pepper decides how much that
+  is worth.** With `SCRAPPY_TOKEN_PEPPER` set, a copied database yields nothing
+  usable. With the generated fallback, the pepper sits in the same directory, so
+  one theft yields both the verifiers and the key to test guesses against them.
 - **No rate limiting.** Guessing is unthrottled by Scrappy OS; entropy in the
   token is what makes guessing impractical, so a short token is a real weakness
   (`doctor` warns below 16 characters).
+- **Credential administration is unauthenticated.** `scrappy token create` will
+  mint any scope for anyone who can run it. The boundary is host file
+  permissions; the mitigation is that every issuance is audited with the
+  administrator's identity.
 - **CSRF is mitigated only incidentally.** Requiring an `Authorization` header
   means a simple form POST cannot authenticate, and no cookie is ever issued -
   but a page that can read the token from a compromised client can still use it.
 - **A token in `.env` is readable by anyone who can read `.env`.** File
   permissions are the control there, and the CLI does not pretend otherwise.
 
+**Delivered since.** v0.2.1 added persisted credentials: multiple credentials
+per actor, overlap-based rotation, immediate revocation and optional expiry.
+See [CREDENTIALS.md](CREDENTIALS.md).
+
 **Planned.** mTLS for service and node identity, short-lived scoped capability
-tokens, and multiple credentials with overlap-based rotation. The
-`Authenticator` protocol and the `TokenCredential` list exist so these arrive as
-siblings rather than as a rewrite of the token checker.
+tokens, and rate limiting on authentication. The `Authenticator` and
+`CredentialStore` protocols exist so these arrive as siblings rather than as a
+rewrite of the token checker.
 
 ---
 
@@ -348,7 +364,8 @@ make security-test        # or: pytest tests/security -v
 - `test_shell_boundaries.py` - classification, allowlist, timeout, truncation,
   environment isolation
 - `test_ssrf.py` - private ranges, schemes, metadata endpoints, credential headers
-- `test_secret_redaction.py` - keys, value shapes, logs, audit, settings
+- `test_secret_redaction.py` - keys, value shapes, logs, audit, settings, and
+  that the identity allowlist exempts names rather than payloads
 - `test_policy_enforcement.py` - fail-closed policy, approval single-use,
   destructive confirmation
 - `test_api_authentication.py` - missing, wrong and malformed credentials, the
@@ -361,3 +378,11 @@ make security-test        # or: pytest tests/security -v
 - `test_config_secrets.py` - secrets load, are not silently ignored, and do not
   leak through repr, logs, exceptions or `config show`
 - `test_doctor_exposure.py` - the bind-address and credential truth table
+- `test_credential_authentication.py` - every way a stored credential fails, and
+  that all of them look identical to the caller
+- `test_credential_lifecycle.py` - create, revoke, rotate, prune, rotation
+  atomicity, and that administration is audited with the administrator's identity
+- `test_pepper.py` - provenance, file mode, and that credentials survive a
+  restart
+- `test_doctor_credentials.py` - the pepper report, and that reporting on it
+  never creates or prints one

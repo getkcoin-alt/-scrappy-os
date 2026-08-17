@@ -265,18 +265,46 @@ Being explicit, because this is the control most likely to be over-trusted:
 - **It carries no integrity over the request body.** Plaintext HTTP is
   interceptable and modifiable in flight; TLS is what fixes that, and Scrappy OS
   does not terminate TLS itself.
-- **There is no expiry.** A token is valid until an operator removes it, so
-  theft is permanent until noticed. Rotation is manual: edit the configuration
-  and restart.
-- **Revocation is a restart.** Credentials are read once at app construction.
-- **One token means one identity.** Everything authenticating with it is the
-  same principal in the audit trail. Per-human attribution needs per-human
-  credentials, which the `TokenCredential` list supports but v0.2 does not yet
-  configure.
+- **Rate limiting does not exist.** Nothing throttles authentication attempts.
+  High-entropy secrets make online guessing impractical rather than blocked.
 
-This is why loopback remains the default bind and why `doctor` FAILs on a
-non-loopback bind with no credential. Authentication makes remote exposure
-*survivable*; it does not make it advisable.
+Three limitations in this list were lifted in v0.2.1 by persisted credentials
+(see [CREDENTIALS.md](CREDENTIALS.md)) and are recorded here because the
+distinction matters when reading older deployments:
+
+- **Expiry now exists.** `expires_at` is set at issue time
+  (`scrappy token create --expires-in 30d`) and evaluated against the clock on
+  every request. A credential with no expiry is still valid indefinitely, so
+  this is an option an operator takes, not a default.
+- **Revocation is immediate, not a restart.** `CredentialAuthenticator` reads
+  the row on every request, so `scrappy token revoke` takes effect on the next
+  call. There is no cache to invalidate. The legacy `SCRAPPY_API_TOKEN` path
+  *is* still read once at construction and still needs a restart.
+- **One actor may hold several credentials.** A person can carry a laptop token
+  and a CI token, lose one and rotate it, and remain the same principal in the
+  audit trail. Every row carries both `actor_id` and the `credential_id` that
+  proved it.
+
+What has *not* changed: a bearer token is still a replayable shared secret sent
+in full on every request. Expiry and revocation shorten the window after theft;
+they do not close it. This is why loopback remains the default bind and why
+`doctor` FAILs on a non-loopback bind with no credential. Authentication makes
+remote exposure *survivable*; it does not make it advisable.
+
+### Credential storage
+
+The raw token is never persisted. What is stored is
+`HMAC-SHA256(pepper, secret)` plus non-secret identifiers, so an attacker who
+copies `scrappy.db` holds verifiers rather than usable tokens.
+
+The pepper's location decides how much that is worth. `SCRAPPY_TOKEN_PEPPER`
+keeps the key outside the data directory; the generated fallback stores it
+*beside* the database it protects, which is weaker because one stolen directory
+yields both. `doctor` reports which of the two is in force, and FAILs if the
+generated file is readable beyond its owner.
+
+Residual: pepper and database taken together permit offline confirmation of a
+guessed token. Reversing a verifier into a token remains infeasible.
 
 ## Secret handling
 
@@ -301,16 +329,17 @@ non-loopback bind with no credential. Authentication makes remote exposure
 - Large tool output is stored as a SHA-256 digest plus a bounded preview, so
   the audit database does not become a second copy of `/etc`.
 
-## What is *not* protected in v0.2
+## What is *not* protected in v0.2.1
 
 Stated plainly. A security model whose edges you cannot see is not one.
 
 | Gap | Consequence | Mitigation today |
 |---|---|---|
-| **Bearer tokens are replayable** | A captured request stays valid until the token is rotated | Loopback default; terminate TLS in front of any remote bind; rotate on suspicion |
-| **No token expiry or revocation list** | Theft is permanent until an operator notices and restarts | Rotation is manual: change config, restart. Short-lived credentials are a roadmap item |
+| **Bearer tokens are replayable** | A captured request stays valid until the credential is revoked or expires | Loopback default; terminate TLS in front of any remote bind; `scrappy token revoke` takes effect on the next request |
+| **Expiry is opt-in** | A credential issued without `--expires-in` never ages out, so theft is indefinite until noticed | Issue with `--expires-in`; rotate on suspicion. Short-lived capability tokens remain a roadmap item |
 | **No server authentication** | A client pointed at the wrong host hands over its credential | TLS with a verified certificate, terminated by a proxy. mTLS is the planned fix |
-| **One token, one identity** | Everything using it is the same principal in the audit trail | Run separate instances per trust domain; the credential list already supports more |
+| **Pepper beside the database** | If the fallback pepper is used, one stolen data directory yields verifiers *and* the key to test guesses against them | Set `SCRAPPY_TOKEN_PEPPER`; `doctor` warns while it is unset |
+| **`scrappy token` is unauthenticated** | Anyone who can run it can mint a credential with any scope | Host file permissions are the boundary; every issuance is audited with the administrator's identity |
 | **Scopes are coarse** | `task:create` permits any objective, at any ceiling the body asks for | The risk ceiling, policy engine and approval gate still bound what that task can *do* |
 | **No per-actor policy** | Every authenticated principal faces identical risk rules | `PolicyContext` already receives the actor; no rule consults it yet |
 | **No rate limiting** | Token guessing and task flooding are unthrottled | Loopback default; put a proxy in front for anything else |
