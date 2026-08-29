@@ -214,3 +214,94 @@ class TestRejection:
         rendered = f"{caught.value} {caught.value.args!r} {caught.value.__dict__!r}"
         assert "supersecretvalue" not in rendered
         assert secret not in rendered
+
+
+class TestFailClosed:
+    async def test_an_empty_store_accepts_nothing(
+        self, authenticator: CredentialAuthenticator
+    ) -> None:
+        """No credentials is zero valid keys, not an open door."""
+        with pytest.raises(AuthenticationFailed):
+            await authenticator.authenticate(bearer("scrp_a8f13e9c2b41_anything"))
+
+    async def test_the_null_authenticator_refuses_everything(self) -> None:
+        null = build_authenticator(None)
+        assert not null.configured
+        with pytest.raises(AuthenticationFailed) as caught:
+            await null.authenticate(bearer("anything"))
+        assert caught.value.reason is AuthFailureReason.NO_CREDENTIALS_CONFIGURED
+
+    async def test_a_whitespace_only_token_is_treated_as_unconfigured(self) -> None:
+        """It would otherwise report configured while refusing every caller."""
+        assert not build_authenticator(SecretStr("   ")).configured
+
+    async def test_a_credential_store_reports_itself_configured_when_empty(
+        self, authenticator: CredentialAuthenticator
+    ) -> None:
+        """Empty is not broken; doctor counts credentials, this reports capability."""
+        assert authenticator.configured
+
+
+class TestLegacyToken:
+    async def test_a_legacy_token_still_works_alongside_credentials(
+        self, credential_store: SqliteCredentialStore
+    ) -> None:
+        """Upgrading must not lock out a deployment mid-migration."""
+        legacy = build_authenticator(SecretStr("legacy-token-value-1234567890"))
+        combined = CredentialAuthenticator(
+            credential_store, pepper=PEPPER, legacy=legacy
+        )
+        actor = await combined.authenticate(bearer("legacy-token-value-1234567890"))
+        assert actor.auth_method is AuthMethod.BEARER_TOKEN
+
+    async def test_a_stored_credential_is_preferred_over_the_legacy_token(
+        self, credential_store: SqliteCredentialStore, service: CredentialService
+    ) -> None:
+        legacy = build_authenticator(SecretStr("legacy-token-value-1234567890"))
+        combined = CredentialAuthenticator(
+            credential_store, pepper=PEPPER, legacy=legacy
+        )
+        issued = await service.create(
+            actor_id="svc-stored", actor_type=ActorType.SERVICE, scopes=frozenset()
+        )
+        assert (await combined.authenticate(bearer(issued.token))).id == "svc-stored"
+
+    async def test_without_a_legacy_token_a_foreign_format_is_refused(
+        self, authenticator: CredentialAuthenticator
+    ) -> None:
+        with pytest.raises(AuthenticationFailed):
+            await authenticator.authenticate(bearer("some-other-systems-token"))
+
+
+class TestLastUsedTracking:
+    async def test_a_successful_authentication_can_be_recorded(
+        self, credential_store: SqliteCredentialStore, service: CredentialService
+    ) -> None:
+        seen: list[Credential] = []
+
+        async def remember(credential: Credential) -> None:
+            seen.append(credential)
+
+        authenticator = CredentialAuthenticator(
+            credential_store, pepper=PEPPER, on_authenticated=remember
+        )
+        issued = await service.create(
+            actor_id="svc", actor_type=ActorType.SERVICE, scopes=frozenset()
+        )
+        await authenticator.authenticate(bearer(issued.token))
+        assert [c.credential_id for c in seen] == [issued.credential.credential_id]
+
+    async def test_a_failed_authentication_records_nothing(
+        self, credential_store: SqliteCredentialStore
+    ) -> None:
+        seen: list[Credential] = []
+
+        async def remember(credential: Credential) -> None:  # pragma: no cover
+            seen.append(credential)
+
+        authenticator = CredentialAuthenticator(
+            credential_store, pepper=PEPPER, on_authenticated=remember
+        )
+        with pytest.raises(AuthenticationFailed):
+            await authenticator.authenticate(bearer("scrp_a8f13e9c2b41_wrong"))
+        assert seen == []
