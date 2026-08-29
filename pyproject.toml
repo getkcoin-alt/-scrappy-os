@@ -44,7 +44,7 @@ dev = [
 ]
 
 [project.scripts]
-scrappy = "scrappy_os.interface.cli:main"
+scrappy = "scrappy_os.interface.entrypoint:main"
 
 [project.urls]
 Homepage = "https://github.com/getkcoin-alt/-scrappy-os"

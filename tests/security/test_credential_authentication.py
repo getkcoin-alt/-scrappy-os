@@ -212,7 +212,7 @@ class TestRejection:
     async def test_an_expired_credential_is_refused(
         self, credential_store: SqliteCredentialStore, service: CredentialService
     ) -> None:
-        now = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
+        now = datetime.now(UTC)
         issued = await service.create(
             actor_id="svc",
             actor_type=ActorType.SERVICE,
