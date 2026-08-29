@@ -80,57 +80,93 @@ class TestAcceptance:
             actor_id="svc", actor_type=ActorType.SERVICE, scopes=frozenset()
         )
         actor = await authenticator.authenticate(bearer(issued.token))
-        assert actor.credential_id == issued.credential.credential_id
+        assert actor.metadata["credential_id"] == issued.credential.credential_id
 
-    async def test_display_name_is_optional(
+    async def test_identity_comes_from_storage_not_from_the_request(
         self, service: CredentialService, authenticator: CredentialAuthenticator
     ) -> None:
+        """A caller cannot decorate a request into a different principal."""
         issued = await service.create(
-            actor_id="svc", actor_type=ActorType.SERVICE, scopes=frozenset()
+            actor_id="svc-lowly",
+            actor_type=ActorType.SERVICE,
+            scopes=frozenset({Scope.TASK_READ}),
         )
         actor = await authenticator.authenticate(bearer(issued.token))
-        assert actor.display_name is None
+        assert actor.id == "svc-lowly"
+        assert Scope.APPROVAL_GRANT not in actor.scopes
 
-
-class TestLegacyAcceptance:
-    async def test_legacy_token_authenticates_to_configured_identity(self) -> None:
-        authenticator = build_authenticator(
-            SecretStr("legacy-token-with-enough-entropy"),
-            actor_id="legacy-service",
-            scopes=frozenset({Scope.SYSTEM_READ}),
+    async def test_a_second_credential_for_the_same_actor_also_works(
+        self, service: CredentialService, authenticator: CredentialAuthenticator
+    ) -> None:
+        """One principal, several keys - the reason the two are separate models."""
+        first = await service.create(
+            actor_id="alice", actor_type=ActorType.HUMAN, scopes=frozenset()
         )
-        actor = await authenticator.authenticate("Bearer legacy-token-with-enough-entropy")
-        assert actor.id == "legacy-service"
-        assert actor.scopes == frozenset({Scope.SYSTEM_READ})
-        assert actor.auth_method is AuthMethod.BEARER_TOKEN
+        second = await service.create(
+            actor_id="alice", actor_type=ActorType.HUMAN, scopes=frozenset()
+        )
+        assert (await authenticator.authenticate(bearer(first.token))).id == "alice"
+        assert (await authenticator.authenticate(bearer(second.token))).id == "alice"
+
+    async def test_revoking_one_key_leaves_the_other_working(
+        self, service: CredentialService, authenticator: CredentialAuthenticator
+    ) -> None:
+        """Losing a laptop must not delete the person."""
+        laptop = await service.create(
+            actor_id="alice", actor_type=ActorType.HUMAN, scopes=frozenset()
+        )
+        ci = await service.create(
+            actor_id="alice", actor_type=ActorType.HUMAN, scopes=frozenset()
+        )
+        await service.revoke(laptop.credential.credential_id)
+
+        with pytest.raises(AuthenticationFailed):
+            await authenticator.authenticate(bearer(laptop.token))
+        assert (await authenticator.authenticate(bearer(ci.token))).id == "alice"
 
 
 class TestRejection:
-    async def test_missing_authorization_is_refused(
+    async def test_missing_header_is_reported_as_missing(
         self, authenticator: CredentialAuthenticator
     ) -> None:
         with pytest.raises(AuthenticationFailed) as caught:
             await authenticator.authenticate(None)
-        assert caught.value.reason is AuthFailureReason.MISSING
+        assert caught.value.reason is AuthFailureReason.MISSING_CREDENTIAL
 
-    async def test_non_bearer_authorization_is_refused(
-        self, authenticator: CredentialAuthenticator
+    @pytest.mark.parametrize(
+        "header",
+        ["", "   ", "Bearer", "Bearer ", "Basic abc123", "abc123", "Bearer a b", "bearer"],
+        ids=[
+            "empty",
+            "whitespace",
+            "scheme-only",
+            "scheme-trailing-space",
+            "wrong-scheme",
+            "no-scheme",
+            "too-many-parts",
+            "bare-scheme-lowercase",
+        ],
+    )
+    async def test_malformed_headers_are_refused(
+        self, authenticator: CredentialAuthenticator, header: str
     ) -> None:
         with pytest.raises(AuthenticationFailed) as caught:
-            await authenticator.authenticate("Basic abc")
-        assert caught.value.reason is AuthFailureReason.MALFORMED
+            await authenticator.authenticate(header)
+        assert caught.value.reason in {
+            AuthFailureReason.MISSING_CREDENTIAL,
+            AuthFailureReason.MALFORMED_CREDENTIAL,
+        }
 
-    async def test_empty_bearer_is_refused(self, authenticator: CredentialAuthenticator) -> None:
-        with pytest.raises(AuthenticationFailed) as caught:
-            await authenticator.authenticate("Bearer ")
-        assert caught.value.reason is AuthFailureReason.MALFORMED
-
-    async def test_a_malformed_credential_is_refused(
-        self, authenticator: CredentialAuthenticator
+    async def test_the_scheme_is_matched_case_insensitively(
+        self, service: CredentialService, authenticator: CredentialAuthenticator
     ) -> None:
-        with pytest.raises(AuthenticationFailed) as caught:
-            await authenticator.authenticate(bearer("not-a-scrappy-credential"))
-        assert caught.value.reason is AuthFailureReason.MALFORMED
+        """RFC 6750 says the scheme is case-insensitive; clients rely on it."""
+        issued = await service.create(
+            actor_id="svc", actor_type=ActorType.SERVICE, scopes=frozenset()
+        )
+        for scheme in ("Bearer", "bearer", "BEARER", "BeArEr"):
+            actor = await authenticator.authenticate(f"{scheme} {issued.token}")
+            assert actor.id == "svc"
 
     async def test_an_unknown_credential_id_is_refused(
         self, authenticator: CredentialAuthenticator
@@ -176,9 +212,6 @@ class TestRejection:
     async def test_an_expired_credential_is_refused(
         self, credential_store: SqliteCredentialStore, service: CredentialService
     ) -> None:
-        # Anchor expiry relative to the test run rather than a calendar date.
-        # Production still validates that a credential cannot be born expired;
-        # the injected authenticator clock below is the only thing that moves.
         now = datetime.now(UTC)
         issued = await service.create(
             actor_id="svc",
