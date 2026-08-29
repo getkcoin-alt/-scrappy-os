@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  contract:
+  full-suite:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,4 +19,4 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[dev]"
-      - run: pytest -q tests/test_syncbond_contract.py
+      - run: pytest -q
